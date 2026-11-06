@@ -66,6 +66,10 @@ config ETH_ADIN2111_BRIDGE
 	  ones it delivers and gives it the FDB entries. The bridge is not
 	  started, bring it up as any bridge.
 
+	  Without it the device does not forward between its ports, and a
+	  software bridge of them forwards and runs the spanning tree
+	  protocol as for any other ports.
+
 config ETH_ADIN2111_BRIDGE_INIT_PRIORITY
 	int "Initialization priority of the port bridge"
 	depends on ETH_ADIN2111_BRIDGE

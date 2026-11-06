@@ -1005,13 +1005,14 @@ static int adin2111_write_filter_address(const struct device *dev,
 static int adin2111_filter_multicast(const struct device *dev)
 {
 	const struct adin2111_config *cfg = dev->config;
+	const struct adin2111_data *ctx = dev->data;
 	const bool is_adin2111 = (cfg->id == ADIN2111_MAC);
 	uint8_t mm[NET_ETH_ADDR_LEN] = {BIT(0), 0U, 0U, 0U, 0U, 0U};
 	uint8_t mmask[NET_ETH_ADDR_LEN] = {0xFFU, 0U, 0U, 0U, 0U, 0U};
 	uint32_t rules = ADIN2111_ADDR_APPLY2PORT1 |
 			 (is_adin2111 ? ADIN2111_ADDR_APPLY2PORT2 : 0) |
 			 ADIN2111_ADDR_TO_HOST |
-			 ADIN2111_ADDR_TO_OTHER_PORT;
+			 (ctx->forwarding ? ADIN2111_ADDR_TO_OTHER_PORT : 0);
 
 	return adin2111_write_filter_address(dev, mm, mmask, rules,
 					     ADIN2111_MULTICAST_ADDR_SLOT);
@@ -1020,12 +1021,13 @@ static int adin2111_filter_multicast(const struct device *dev)
 static int adin2111_filter_broadcast(const struct device *dev)
 {
 	const struct adin2111_config *cfg = dev->config;
+	const struct adin2111_data *ctx = dev->data;
 	const bool is_adin2111 = (cfg->id == ADIN2111_MAC);
 	uint8_t mac[NET_ETH_ADDR_LEN] = {0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU, 0xFFU};
 	uint32_t rules = ADIN2111_ADDR_APPLY2PORT1 |
 			 (is_adin2111 ? ADIN2111_ADDR_APPLY2PORT2 : 0) |
 			 ADIN2111_ADDR_TO_HOST |
-			 ADIN2111_ADDR_TO_OTHER_PORT;
+			 (ctx->forwarding ? ADIN2111_ADDR_TO_OTHER_PORT : 0);
 
 	return adin2111_write_filter_address(dev, mac, mac, rules,
 					     ADIN2111_BROADCAST_ADDR_SLOT);
@@ -1136,6 +1138,42 @@ static int eth_adin2111_clear_mac_filter(const struct device *dev, uint8_t *mac,
 }
 
 #if defined(CONFIG_ETH_ADIN2111_BRIDGE)
+/* Let the device forward the frames between its ports: the ones with an unknown
+ * destination address, and the multicast and broadcast ones. Called with the
+ * device locked.
+ */
+static int adin2111_set_forwarding(const struct device *dev, bool enable)
+{
+	const struct adin2111_config *cfg = dev->config;
+	struct adin2111_data *ctx = dev->data;
+	const uint32_t mask = ADIN2111_CONFIG2_PORT_CUT_THRU_EN |
+			      ADIN2111_CONFIG2_P1_FWD_UNK2P2 | ADIN2111_CONFIG2_P2_FWD_UNK2P1;
+	int ret;
+
+	if (cfg->id != ADIN2111_MAC) {
+		return -ENOTSUP;
+	}
+
+	ctx->forwarding = enable;
+
+	ret = adin2111_filter_multicast(dev);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = adin2111_filter_broadcast(dev);
+	if (ret < 0) {
+		return ret;
+	}
+
+	ret = eth_adin2111_reg_update(dev, ADIN2111_CONFIG2, mask, enable ? mask : 0);
+	if (ret < 0) {
+		return ret;
+	}
+
+	return adin2111_config_sync(dev);
+}
+
 /* Slot of the address filter that holds an FDB entry of the bridge, if any, for
  * the n-th time.
  */
@@ -1629,14 +1667,9 @@ static int adin2111_init(const struct device *dev)
 
 	val |= ADIN2111_CONFIG2_CRC_APPEND;
 
-	/* configure forwarding of frames with unknown destination address */
-	/* to the other port. This forwarding is done in hardware.         */
-	/* The setting will take effect after the ports                    */
-	/* are out of software powerdown.                                  */
-	val |= (ADIN2111_CONFIG2_PORT_CUT_THRU_EN |
-		(is_adin2111 ? ADIN2111_CONFIG2_P1_FWD_UNK2P2 : 0) |
-		(is_adin2111 ? ADIN2111_CONFIG2_P2_FWD_UNK2P1 : 0));
-
+	/* The device does not forward frames between its ports, until a bridge of
+	 * them is set to forward in hardware, see adin2111_set_forwarding().
+	 */
 	ret = eth_adin2111_reg_write(dev, ADIN2111_CONFIG2, val);
 	if (ret < 0) {
 		LOG_ERR("Failed to write CONFIG2, %d", ret);
@@ -1786,9 +1819,9 @@ static const struct eth_bridge_hw_ops adin2111_bridge_ops = {
 	.fdb_del = adin2111_bridge_fdb_del,
 };
 
-/* The two ports forward frames with an unknown destination to each other, see
- * the CONFIG2 setup in adin2111_init(). A bridge of the two ports forwards in
- * hardware, so that the bridge does not forward as well.
+/* The device forwards the frames between its two ports only with a bridge of
+ * them, which then forwards in hardware and not in software. Without it, the
+ * ports are plain ports, that a software bridge can use.
  */
 static int adin2111_bridge_init(void)
 {
@@ -1822,6 +1855,14 @@ static int adin2111_bridge_init(void)
 					adins[i]->name, port, ret);
 				return ret;
 			}
+		}
+
+		(void)eth_adin2111_lock(adins[i], K_FOREVER);
+		ret = adin2111_set_forwarding(adins[i], true);
+		(void)eth_adin2111_unlock(adins[i]);
+		if (ret < 0) {
+			LOG_ERR("%s: forwarding not set, %d", adins[i]->name, ret);
+			return ret;
 		}
 
 		ret = eth_bridge_set_hw_forwarding(br, &adin2111_bridge_ops, (void *)adins[i]);

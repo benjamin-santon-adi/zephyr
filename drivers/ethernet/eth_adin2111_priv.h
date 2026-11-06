@@ -242,6 +242,8 @@ struct adin2111_data {
 	uint16_t scur;
 	/* Address filter slots that hold FDB entries of the bridge */
 	uint16_t fdb_slots;
+	/* The device forwards frames between its ports */
+	bool forwarding;
 	struct gpio_callback gpio_int_callback;
 	bool oa;
 	bool oa_prot;
