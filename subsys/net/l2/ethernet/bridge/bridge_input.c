@@ -158,6 +158,24 @@ enum net_verdict eth_bridge_input_process(struct net_if *iface, struct net_pkt *
 		return NET_CONTINUE;
 	}
 
+	/* The device of the port forwards with its own FDB, which the bridge
+	 * programs. What it passes to the host is for the host: it is neither
+	 * learned from nor forwarded here, whatever the port state, which the
+	 * device applies as well.
+	 */
+	if (eth_bridge_port_hw_forwarding(iface)) {
+		if (net_ntohs(NET_ETH_HDR(pkt)->type) == NET_ETH_PTYPE_PTP) {
+			return NET_CONTINUE;
+		}
+
+		verdict = eth_bridge_handle_locally(bridge, iface, pkt);
+		if (verdict == NET_CONTINUE) {
+			*dst_iface = bridge;
+		}
+
+		return verdict;
+	}
+
 	state = eth_bridge_port_get_state(iface);
 
 	/* Learn where the sender is, on a learning or forwarding port */

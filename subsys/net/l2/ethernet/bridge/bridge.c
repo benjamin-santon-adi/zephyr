@@ -91,6 +91,122 @@ void net_eth_bridge_foreach(eth_bridge_cb_t cb, void *user_data)
 	net_if_foreach(iface_cb, &br_user_data);
 }
 
+struct net_if *eth_bridge_get_port_iface(struct net_if *br, size_t port)
+{
+	const struct device *dev = net_if_get_device(br);
+	struct eth_bridge_iface_context *ctx;
+
+	NET_ASSERT(dev != NULL);
+
+	ctx = dev->data;
+
+	if (port >= ARRAY_SIZE(ctx->ports)) {
+		return NULL;
+	}
+
+	return ctx->ports[port].iface;
+}
+
+bool eth_bridge_port_hw_forwarding(struct net_if *iface)
+{
+	return net_if_l2(iface) == &NET_L2_GET_NAME(ETHERNET) &&
+	       (net_eth_get_hw_capabilities(iface) & ETHERNET_HW_PORT_FORWARDING) != 0;
+}
+
+uint32_t eth_bridge_port_bit(struct net_if *iface)
+{
+	struct ethernet_context *eth_ctx = net_if_l2_data(iface);
+
+	return BIT(eth_ctx->bridge_port);
+}
+
+int eth_bridge_hw_fdb_check(struct net_if *br, uint32_t portmap)
+{
+	const struct device *dev = net_if_get_device(br);
+	struct eth_bridge_iface_context *ctx;
+	size_t ports = 0U;
+
+	NET_ASSERT(dev != NULL);
+
+	ctx = dev->data;
+
+	ARRAY_FOR_EACH(ctx->ports, i) {
+		struct net_if *port_iface = ctx->ports[i].iface;
+
+		if (port_iface == NULL) {
+			if ((portmap & BIT(i)) != 0U) {
+				return -EINVAL;
+			}
+
+			continue;
+		}
+
+		if (!eth_bridge_port_hw_forwarding(port_iface)) {
+			return -ENOTSUP;
+		}
+
+		ports++;
+	}
+
+	return ports > 0U ? 0 : -ENOTSUP;
+}
+
+int eth_bridge_hw_fdb_config(struct net_if *br, enum ethernet_config_type type,
+			     const struct ethernet_fdb_entry *entry)
+{
+	const struct device *dev = net_if_get_device(br);
+	struct eth_bridge_iface_context *ctx;
+	struct ethernet_config config = {.fdb_entry = *entry};
+	int ret = 0;
+
+	NET_ASSERT(dev != NULL);
+
+	ctx = dev->data;
+
+	/* The bridge lock is not taken, as callers hold the FDB lock which the
+	 * bridge lock holders also take. A port is removed from the FDB first.
+	 */
+	ARRAY_FOR_EACH(ctx->ports, i) {
+		struct net_if *port_iface = ctx->ports[i].iface;
+		const struct device *port_dev;
+		const struct ethernet_api *api;
+		bool seen = false;
+
+		if (port_iface == NULL || !eth_bridge_port_hw_forwarding(port_iface)) {
+			continue;
+		}
+
+		port_dev = net_if_get_device(port_iface);
+
+		/* One call for each device, as it programs all its ports */
+		for (size_t j = 0; j < i; j++) {
+			if (ctx->ports[j].iface != NULL &&
+			    net_if_get_device(ctx->ports[j].iface) == port_dev) {
+				seen = true;
+				break;
+			}
+		}
+
+		if (seen) {
+			continue;
+		}
+
+		api = port_dev->api;
+		if (api->set_config == NULL) {
+			return -ENOTSUP;
+		}
+
+		ret = api->set_config(port_dev, port_iface, type, &config);
+		if (ret < 0) {
+			NET_ERR("iface %d: hardware FDB entry failed (%d)",
+				net_if_get_by_iface(port_iface), ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
 int eth_bridge_get_index(struct net_if *br)
 {
 	return net_if_get_by_iface(br);
@@ -641,6 +757,7 @@ static enum net_verdict bridge_iface_send_process(struct net_if *iface,
 	struct net_if *orig_iface;
 	struct net_pkt *send_pkt;
 	uint32_t fwd_ports = 0U;
+	uint32_t hw_portmap = UINT32_MAX;
 	int fwd_iface_num = 0;
 
 	BUILD_ASSERT(NET_ETHERNET_BRIDGE_ETH_INTERFACE_COUNT <= 32,
@@ -661,6 +778,23 @@ static enum net_verdict bridge_iface_send_process(struct net_if *iface,
 
 	send_pkt = pkt;
 
+#if defined(CONFIG_NET_ETHERNET_BRIDGE_FDB)
+	/* A frame for an address of the FDB only goes out of its ports, the
+	 * others are flooded, as the devices only forward what they receive.
+	 */
+	{
+		struct net_linkaddr *dst = net_pkt_lladdr_dst(pkt);
+		uint32_t portmap;
+		bool host_rx;
+
+		if (dst->len == NET_ETH_ADDR_LEN &&
+		    eth_bridge_fdb_hw_lookup(iface, (struct net_eth_addr *)dst->addr, &portmap,
+					     &host_rx)) {
+			hw_portmap = portmap;
+		}
+	}
+#endif
+
 	lock_bridge(ctx);
 
 	orig_iface = net_pkt_orig_iface(pkt);
@@ -671,7 +805,8 @@ static enum net_verdict bridge_iface_send_process(struct net_if *iface,
 	ARRAY_FOR_EACH(ctx->ports, i) {
 		struct net_if *port_iface = ctx->ports[i].iface;
 
-		if (port_iface != NULL && port_iface != orig_iface) {
+		if (port_iface != NULL && port_iface != orig_iface &&
+		    (hw_portmap & BIT(i)) != 0U) {
 			/* Skip it if not up or not forwarding */
 			if (!net_if_flag_is_set(port_iface, NET_IF_UP) ||
 			    atomic_get(&ctx->ports[i].state) != ETH_BRIDGE_PORT_STATE_FORWARDING) {

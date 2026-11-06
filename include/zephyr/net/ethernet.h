@@ -205,7 +205,13 @@ enum ethernet_hw_caps {
 	/** TX-Injection supported */
 	ETHERNET_TXINJECTION_MODE	= BIT(20),
 
-	/** The device forwards frames between its ports in hardware */
+	/** The device forwards frames between its ports in hardware. The
+	 *  Ethernet bridge then neither learns from nor forwards the frames
+	 *  received on its ports, it only delivers to the host the ones the
+	 *  device passes to it, and gives the device its FDB entries with
+	 *  ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET and
+	 *  ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL, see @ref ethernet_fdb_entry.
+	 */
 	ETHERNET_HW_PORT_FORWARDING	= BIT(21),
 
 	/** The device applies a spanning tree port state to its hardware
@@ -241,6 +247,8 @@ enum ethernet_config_type {
 	ETHERNET_CONFIG_TYPE_EXTRA_TX_PKT_HEADROOM,
 	ETHERNET_CONFIG_TYPE_STP_PORT_STATE,
 	ETHERNET_CONFIG_TYPE_FDB_FLUSH,
+	ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET,
+	ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL,
 };
 
 enum ethernet_qav_param_type {
@@ -542,6 +550,25 @@ enum ethernet_stp_port_state {
 	ETHERNET_STP_PORT_STATE_FORWARDING,
 };
 
+/**
+ * @brief Forwarding database entry of a device that forwards in hardware
+ *
+ * Passed with ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET to a port whose device reports
+ * ETHERNET_HW_PORT_FORWARDING. The interface given to the driver is one of the ports of the
+ * bridge, and bit n of @ref portmap stands for the bridge port n. The device
+ * finds the interface of a bit with eth_bridge_get_port_iface().
+ * ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL only uses @ref mac. A device with several
+ * ports of the bridge gets one call for the whole device.
+ */
+struct ethernet_fdb_entry {
+	/** Destination MAC address, unicast or multicast */
+	struct net_eth_addr mac;
+	/** Bridge ports the frames for @ref mac are sent out of. */
+	uint32_t portmap;
+	/** The frames for @ref mac are also passed to the host */
+	bool host_rx;
+};
+
 /** @cond INTERNAL_HIDDEN */
 
 struct ethernet_config {
@@ -566,6 +593,8 @@ struct ethernet_config {
 		uint16_t extra_tx_pkt_headroom;
 
 		enum ethernet_stp_port_state stp_port_state;
+
+		struct ethernet_fdb_entry fdb_entry;
 	} /**< Value for the selected Ethernet configuration type */;
 };
 

@@ -122,6 +122,16 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface);
 int eth_bridge_iface_remove(struct net_if *br, struct net_if *iface);
 
 /**
+ * @brief Get the Ethernet interface of a bridge port
+ *
+ * @param br A pointer to a bridge interface
+ * @param port Index of the port, the bit of a port map
+ *
+ * @return The interface of the port, or NULL if @p port is not in use.
+ */
+struct net_if *eth_bridge_get_port_iface(struct net_if *br, size_t port);
+
+/**
  * @brief Get bridge index according to pointer
  *
  * @param br Pointer to bridge instance

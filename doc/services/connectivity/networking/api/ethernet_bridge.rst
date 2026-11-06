@@ -45,6 +45,22 @@ addresses to ports:
 :kconfig:option:`CONFIG_NET_ETHERNET_BRIDGE_FDB_MAX_ENTRIES` bounds the table. ``net bridge fdb
 show`` lists it.
 
+Hardware forwarding
+===================
+
+A device that reports :c:enumerator:`ETHERNET_HW_PORT_FORWARDING` forwards frames between its
+ports. On such a port the bridge neither learns, forwards nor floods: it passes to the host only
+the frames the device delivers, and the FDB is programmed into the device.
+
+:c:func:`eth_bridge_fdb_add` and ``net bridge fdb add <mac> <iface> [<portmap> [host]]`` take a
+port map and a host receive flag for it. Bit n of the port map is the bridge port n, whose interface
+:c:func:`eth_bridge_get_port_iface` returns, and a port map of 0 is the interface alone. The
+bridge calls the ``set_config`` of the driver with ``ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET`` or
+``ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL`` and a :c:struct:`ethernet_fdb_entry`, once for each device
+of the bridge, and :c:func:`eth_bridge_fdb_del` deletes the entry. A frame the host sends goes out
+of the ports of its entry, or of all ports when the address has none. All the ports of the bridge
+must report the capability for an entry with a port map.
+
 Spanning tree
 *************
 

@@ -244,6 +244,8 @@ static int cmd_bridge_fdb_add(const struct shell *sh, size_t argc, char *argv[])
 #if defined(CONFIG_NET_ETHERNET_BRIDGE_FDB)
 	struct net_eth_addr mac;
 	struct net_if *iface;
+	unsigned long portmap = 0;
+	bool host_rx = false;
 	int iface_idx;
 	int ret;
 
@@ -271,7 +273,24 @@ static int cmd_bridge_fdb_add(const struct shell *sh, size_t argc, char *argv[])
 		return -EINVAL;
 	}
 
-	ret = eth_bridge_fdb_add(&mac, iface);
+	if (argc > 3) {
+		portmap = shell_strtoul(argv[3], 16, &ret);
+		if (ret < 0 || portmap > UINT32_MAX) {
+			shell_error(sh, "Wrong port map: %s", argv[3]);
+			return -EINVAL;
+		}
+	}
+
+	if (argc > 4) {
+		if (strcmp(argv[4], "host") != 0) {
+			shell_error(sh, "Unknown option: %s", argv[4]);
+			return -EINVAL;
+		}
+
+		host_rx = true;
+	}
+
+	ret = eth_bridge_fdb_add(&mac, iface, (uint32_t)portmap, host_rx);
 	if (ret != 0) {
 		return ret;
 	}
@@ -333,6 +352,14 @@ static int cmd_bridge_fdb_del(const struct shell *sh, size_t argc, char *argv[])
 static void cmd_bridge_fdb_handler(struct eth_bridge_fdb_entry *entry, void *user_data)
 {
 	const struct shell *sh = (const struct shell *)user_data;
+
+	if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U) {
+		shell_print(sh, "%02x:%02x:%02x:%02x:%02x:%02x  ports 0x%x%s  hw",
+			    entry->mac.addr[0], entry->mac.addr[1], entry->mac.addr[2],
+			    entry->mac.addr[3], entry->mac.addr[4], entry->mac.addr[5],
+			    entry->portmap, entry->host_rx ? " +host" : "");
+		return;
+	}
 
 	shell_print(sh, "%02x:%02x:%02x:%02x:%02x:%02x  %-8d  %s",
 		 entry->mac.addr[0], entry->mac.addr[1],
@@ -932,8 +959,9 @@ static int cmd_bridge_stp(const struct shell *sh, size_t argc, char *argv[])
 
 SHELL_STATIC_SUBCMD_SET_CREATE(bridge_fdb_commands,
 	SHELL_CMD_ARG(add, NULL,
-		SHELL_HELP("Add fdb table entry", "<mac address> <interface index>"),
-		cmd_bridge_fdb_add, 2, 1),
+		SHELL_HELP("Add fdb table entry",
+			"<mac address> <interface index> [<port map in hex> [host]]"),
+		cmd_bridge_fdb_add, 2, 2),
 	SHELL_CMD_ARG(del, NULL,
 		SHELL_HELP("Delete fdb table entry", "<mac address> <interface index>"),
 		cmd_bridge_fdb_del, 2, 1),

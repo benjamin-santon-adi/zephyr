@@ -22,11 +22,35 @@ static size_t fdb_count;
 K_MEM_SLAB_DEFINE_STATIC_TYPE(fdb_slab, struct eth_bridge_fdb_entry,
 			      CONFIG_NET_ETHERNET_BRIDGE_FDB_MAX_ENTRIES);
 
+/* Index of the interface of an entry, 0 for an entry with a port map */
+static int fdb_iface_index(const struct eth_bridge_fdb_entry *entry)
+{
+	return entry->iface != NULL ? net_if_get_by_iface(entry->iface) : 0;
+}
+
+/* Give an entry with a port map to the devices of its bridge */
+static int fdb_hw_config(const struct eth_bridge_fdb_entry *entry, enum ethernet_config_type type)
+{
+	struct ethernet_fdb_entry hw_entry = {
+		.portmap = entry->portmap,
+		.host_rx = entry->host_rx,
+	};
+
+	memcpy(&hw_entry.mac, &entry->mac, sizeof(hw_entry.mac));
+
+	return eth_bridge_hw_fdb_config(entry->bridge, type, &hw_entry);
+}
+
 static void fdb_remove(sys_snode_t *prev, struct eth_bridge_fdb_entry *entry)
 {
 	NET_DBG("FDB entry removed: %02x:%02x:%02x:%02x:%02x:%02x -> iface %d", entry->mac.addr[0],
 		entry->mac.addr[1], entry->mac.addr[2], entry->mac.addr[3], entry->mac.addr[4],
-		entry->mac.addr[5], net_if_get_by_iface(entry->iface));
+		entry->mac.addr[5], fdb_iface_index(entry));
+
+	if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U) {
+		/* The device is told, whatever it answers: the entry is gone here */
+		(void)fdb_hw_config(entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL);
+	}
 
 	sys_slist_remove(&fdb_entries, prev, &entry->node);
 	fdb_count--;
@@ -61,7 +85,82 @@ static bool fdb_remove_oldest_learned(void)
 	return true;
 }
 
-int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface)
+static int fdb_add_hw(struct net_if *bridge, const struct net_eth_addr *mac, uint32_t portmap,
+		      bool host_rx)
+{
+	struct eth_bridge_fdb_entry *entry, *found = NULL;
+	struct eth_bridge_fdb_entry new_entry;
+	int ret;
+
+	ret = eth_bridge_hw_fdb_check(bridge, portmap);
+	if (ret != 0) {
+		return ret;
+	}
+
+	k_mutex_lock(&fdb_lock, K_FOREVER);
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&fdb_entries, entry, node) {
+		if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U &&
+		    entry->bridge == bridge &&
+		    memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) == 0) {
+			found = entry;
+			break;
+		}
+	}
+
+	memset(&new_entry, 0, sizeof(new_entry));
+	memcpy(&new_entry.mac, mac, sizeof(struct net_eth_addr));
+	new_entry.bridge = bridge;
+	new_entry.portmap = portmap;
+	new_entry.host_rx = host_rx;
+	new_entry.flags = ETHERNET_BRIDGE_FDB_FLAG_STATIC | ETHERNET_BRIDGE_FDB_FLAG_HW;
+
+	if (found == NULL) {
+		/* As for the other entries, learned ones give way to it */
+		if (fdb_count >= CONFIG_NET_ETHERNET_BRIDGE_FDB_MAX_ENTRIES &&
+		    !fdb_remove_oldest_learned()) {
+			NET_ERR("FDB table full");
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		if (k_mem_slab_alloc(&fdb_slab, (void **)&found, K_NO_WAIT) != 0) {
+			NET_ERR("Failed to allocate FDB entry");
+			ret = -ENOMEM;
+			goto out;
+		}
+
+		ret = fdb_hw_config(&new_entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET);
+		if (ret < 0) {
+			k_mem_slab_free(&fdb_slab, (void *)found);
+			goto out;
+		}
+
+		memcpy(found, &new_entry, sizeof(*found));
+		sys_slist_prepend(&fdb_entries, &found->node);
+		fdb_count++;
+	} else {
+		ret = fdb_hw_config(&new_entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET);
+		if (ret < 0) {
+			goto out;
+		}
+
+		found->portmap = portmap;
+		found->host_rx = host_rx;
+	}
+
+	ret = 0;
+
+	NET_DBG("FDB entry set: %02x:%02x:%02x:%02x:%02x:%02x -> ports 0x%x host %d", mac->addr[0],
+		mac->addr[1], mac->addr[2], mac->addr[3], mac->addr[4], mac->addr[5], portmap,
+		host_rx);
+out:
+	k_mutex_unlock(&fdb_lock);
+	return ret;
+}
+
+int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t portmap,
+		       bool host_rx)
 {
 	struct eth_bridge_fdb_entry *entry;
 	struct net_if *bridge;
@@ -78,12 +177,26 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface)
 
 	bridge = net_eth_get_bridge(net_if_l2_data(iface));
 
+	if (portmap == 0U) {
+		portmap = eth_bridge_port_bit(iface);
+	}
+
+	/* The devices forward on their own, with the port map */
+	if (eth_bridge_port_hw_forwarding(iface)) {
+		return fdb_add_hw(bridge, mac, portmap, host_rx);
+	}
+
+	if (portmap != eth_bridge_port_bit(iface) || host_rx) {
+		return -ENOTSUP;
+	}
+
 	k_mutex_lock(&fdb_lock, K_FOREVER);
 
 	/* Check if the mac already exists in the FDB table of this bridge */
 	SYS_SLIST_FOR_EACH_CONTAINER(&fdb_entries, entry, node) {
-		if (memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) == 0 &&
-		    net_eth_get_bridge(net_if_l2_data(entry->iface)) == bridge) {
+		if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) == 0U &&
+		    memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) == 0 &&
+		    entry->bridge == bridge) {
 
 			if (entry->iface == iface) {
 				/* A learned entry becomes static */
@@ -126,6 +239,9 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface)
 	/* Initialize entry */
 	memcpy(&entry->mac, mac, sizeof(struct net_eth_addr));
 	entry->iface = iface;
+	entry->bridge = bridge;
+	entry->portmap = 0U;
+	entry->host_rx = false;
 	entry->flags = ETHERNET_BRIDGE_FDB_FLAG_STATIC;
 
 	/* Add to list */
@@ -159,22 +275,19 @@ int eth_bridge_fdb_del(struct net_eth_addr *mac, struct net_if *iface)
 
 	SYS_SLIST_FOR_EACH_NODE_SAFE(&fdb_entries, node, next) {
 		entry = CONTAINER_OF(node, struct eth_bridge_fdb_entry, node);
+
+		/* An entry with a port map belongs to the bridge, not to a port */
 		if (memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) != 0 ||
-		    (iface != NULL && entry->iface != iface)) {
+		    (iface != NULL &&
+		     ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U ?
+		      entry->bridge != net_eth_get_bridge(net_if_l2_data(iface)) :
+		      entry->iface != iface))) {
 			prev = node;
 			continue;
 		}
 
-		NET_DBG("FDB entry deleted: %02x:%02x:%02x:%02x:%02x:%02x -> iface %d",
-			mac->addr[0], mac->addr[1], mac->addr[2], mac->addr[3],
-			mac->addr[4], mac->addr[5], net_if_get_by_iface(entry->iface));
-
 		/* Remove from list, prev stays the last kept node */
-		sys_slist_remove(&fdb_entries, prev, node);
-		fdb_count--;
-
-		/* Free memory */
-		k_mem_slab_free(&fdb_slab, (void *)entry);
+		fdb_remove(prev, entry);
 
 		ret = 0;
 
@@ -192,32 +305,48 @@ int eth_bridge_fdb_del_iface(struct net_if *iface)
 {
 	struct eth_bridge_fdb_entry *entry;
 	sys_snode_t *node, *next, *prev = NULL;
+	struct net_if *bridge = NULL;
+	uint32_t bit = 0U;
 
 	/* A NULL iface deletes the entries of every interface */
-	if (iface != NULL && net_eth_get_bridge(net_if_l2_data(iface)) == NULL) {
-		return -EINVAL;
+	if (iface != NULL) {
+		bridge = net_eth_get_bridge(net_if_l2_data(iface));
+		if (bridge == NULL) {
+			return -EINVAL;
+		}
+
+		bit = eth_bridge_port_bit(iface);
 	}
 
 	k_mutex_lock(&fdb_lock, K_FOREVER);
 
 	SYS_SLIST_FOR_EACH_NODE_SAFE(&fdb_entries, node, next) {
 		entry = CONTAINER_OF(node, struct eth_bridge_fdb_entry, node);
+
+		if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U && iface != NULL) {
+			/* The port leaves the port map of the entry */
+			if (entry->bridge == bridge && (entry->portmap & bit) != 0U) {
+				entry->portmap &= ~bit;
+
+				if (entry->portmap == 0U && !entry->host_rx) {
+					fdb_remove(prev, entry);
+					continue;
+				}
+
+				(void)fdb_hw_config(entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET);
+			}
+
+			prev = node;
+			continue;
+		}
+
 		if (iface != NULL && entry->iface != iface) {
 			prev = node;
 			continue;
 		}
 
-		NET_DBG("FDB entry deleted: %02x:%02x:%02x:%02x:%02x:%02x -> iface %d",
-			entry->mac.addr[0], entry->mac.addr[1], entry->mac.addr[2],
-			entry->mac.addr[3], entry->mac.addr[4], entry->mac.addr[5],
-			net_if_get_by_iface(entry->iface));
-
 		/* Remove from list, prev stays the last kept node */
-		sys_slist_remove(&fdb_entries, prev, node);
-		fdb_count--;
-
-		/* Free memory */
-		k_mem_slab_free(&fdb_slab, (void *)entry);
+		fdb_remove(prev, entry);
 	}
 
 	k_mutex_unlock(&fdb_lock);
@@ -297,7 +426,7 @@ void eth_bridge_fdb_learn(struct net_if *bridge, struct net_eth_addr *mac, struc
 
 	SYS_SLIST_FOR_EACH_CONTAINER(&fdb_entries, entry, node) {
 		if (memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) != 0 ||
-		    net_eth_get_bridge(net_if_l2_data(entry->iface)) != bridge) {
+		    entry->bridge != bridge) {
 			continue;
 		}
 
@@ -324,6 +453,9 @@ void eth_bridge_fdb_learn(struct net_if *bridge, struct net_eth_addr *mac, struc
 
 	memcpy(&entry->mac, mac, sizeof(struct net_eth_addr));
 	entry->iface = iface;
+	entry->bridge = bridge;
+	entry->portmap = 0U;
+	entry->host_rx = false;
 	entry->flags = ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC;
 	entry->last_seen = k_uptime_seconds();
 
@@ -350,8 +482,9 @@ size_t eth_bridge_fdb_lookup(struct net_if *bridge, const struct net_eth_addr *m
 	k_mutex_lock(&fdb_lock, K_FOREVER);
 
 	SYS_SLIST_FOR_EACH_CONTAINER(&fdb_entries, entry, node) {
-		if (memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) != 0 ||
-		    net_eth_get_bridge(net_if_l2_data(entry->iface)) != bridge) {
+		if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U ||
+		    memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) != 0 ||
+		    entry->bridge != bridge) {
 			continue;
 		}
 
@@ -377,7 +510,7 @@ void eth_bridge_fdb_flush(struct net_if *bridge, struct net_if *iface, bool dyna
 	SYS_SLIST_FOR_EACH_NODE_SAFE(&fdb_entries, node, next) {
 		entry = CONTAINER_OF(node, struct eth_bridge_fdb_entry, node);
 
-		if (net_eth_get_bridge(net_if_l2_data(entry->iface)) != bridge ||
+		if (entry->bridge != bridge ||
 		    (iface != NULL && entry->iface != iface) ||
 		    (dynamic_only && (entry->flags & ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC) == 0U)) {
 			prev = node;
@@ -389,4 +522,28 @@ void eth_bridge_fdb_flush(struct net_if *bridge, struct net_if *iface, bool dyna
 	}
 
 	k_mutex_unlock(&fdb_lock);
+}
+
+bool eth_bridge_fdb_hw_lookup(struct net_if *bridge, const struct net_eth_addr *mac,
+			      uint32_t *portmap, bool *host_rx)
+{
+	struct eth_bridge_fdb_entry *entry;
+	bool found = false;
+
+	k_mutex_lock(&fdb_lock, K_FOREVER);
+
+	SYS_SLIST_FOR_EACH_CONTAINER(&fdb_entries, entry, node) {
+		if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U &&
+		    entry->bridge == bridge &&
+		    memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) == 0) {
+			*portmap = entry->portmap;
+			*host_rx = entry->host_rx;
+			found = true;
+			break;
+		}
+	}
+
+	k_mutex_unlock(&fdb_lock);
+
+	return found;
 }

@@ -841,7 +841,7 @@ static void test_recv_with_bridge_fdb(void)
 	mac.addr[4] = iface0_index;
 	mac.addr[5] = 0x55;
 
-	ret = eth_bridge_fdb_add(&mac, fake_iface[1]);
+	ret = eth_bridge_fdb_add(&mac, fake_iface[1], 0, false);
 	zassert_equal(ret, 0, "");
 
 	/* fake reception of packets */
@@ -927,7 +927,7 @@ static void test_recv_with_bridge_fdb_ingress(void)
 	recv_data_dst(0, &mac);
 
 	/* Moves the entry test_recv_with_bridge_fdb() put on fake_iface[1] */
-	ret = eth_bridge_fdb_add(&mac, fake_iface[0]);
+	ret = eth_bridge_fdb_add(&mac, fake_iface[0], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	_recv_data(fake_iface[0]);
@@ -958,12 +958,12 @@ static void test_fdb_del_iface(void)
 
 	for (int i = 0; i < 3; i++) {
 		mac.addr[5] = i;
-		ret = eth_bridge_fdb_add(&mac, fake_iface[1]);
+		ret = eth_bridge_fdb_add(&mac, fake_iface[1], 0, false);
 		zassert_equal(ret, 0, "Cannot add FDB entry %d (%d)", i, ret);
 	}
 
 	mac.addr[5] = 0x10;
-	ret = eth_bridge_fdb_add(&mac, fake_iface[2]);
+	ret = eth_bridge_fdb_add(&mac, fake_iface[2], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	zexpect_equal(fdb_count(fake_iface[1]), 3, "Unexpected entries on fake_iface[1]");
@@ -987,11 +987,11 @@ static void test_fdb_del_any_iface(void)
 	struct net_eth_addr ucast = {.addr = {0x02, 0x00, 0x5e, 0x10, 0x00, 0x20}};
 	int ret;
 
-	ret = eth_bridge_fdb_add(&mcast, fake_iface[0]);
+	ret = eth_bridge_fdb_add(&mcast, fake_iface[0], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
-	ret = eth_bridge_fdb_add(&mcast, fake_iface[1]);
+	ret = eth_bridge_fdb_add(&mcast, fake_iface[1], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
-	ret = eth_bridge_fdb_add(&ucast, fake_iface[2]);
+	ret = eth_bridge_fdb_add(&ucast, fake_iface[2], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	ret = eth_bridge_fdb_del(&mcast, NULL);
@@ -1003,7 +1003,7 @@ static void test_fdb_del_any_iface(void)
 	ret = eth_bridge_fdb_del(&mcast, NULL);
 	zexpect_equal(ret, -ENOENT, "Deleted a missing address (%d)", ret);
 
-	ret = eth_bridge_fdb_add(&mcast, fake_iface[0]);
+	ret = eth_bridge_fdb_add(&mcast, fake_iface[0], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	ret = eth_bridge_fdb_del_iface(NULL);
@@ -1079,7 +1079,7 @@ static void test_fdb_learning_own_address(void)
 	(void)recv_frame_and_collect(0, &own, &peer);
 	zexpect_equal(fdb_count_all(), entries, "The bridge address was learned");
 
-	zassert_equal(eth_bridge_fdb_add(&own, fake_iface[0]), 0, "");
+	zassert_equal(eth_bridge_fdb_add(&own, fake_iface[0], 0, false), 0, "");
 	zexpect_equal(recv_frame_and_collect(1, &peer, &own), 0U,
 		      "Frame to the bridge address sent to a port");
 	zassert_equal(eth_bridge_fdb_del(&own, fake_iface[0]), 0, "");
@@ -1097,7 +1097,7 @@ static void test_fdb_learning_keeps_static(void)
 
 	(void)collect_sent();
 
-	ret = eth_bridge_fdb_add((struct net_eth_addr *)&station, fake_iface[0]);
+	ret = eth_bridge_fdb_add((struct net_eth_addr *)&station, fake_iface[0], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	/* The station shows up behind another port */
@@ -1132,7 +1132,7 @@ static void test_fdb_flush(void)
 	(void)recv_frame_and_collect(0, &a, &b);
 	(void)recv_frame_and_collect(2, &b, &a);
 
-	ret = eth_bridge_fdb_add((struct net_eth_addr *)&c, fake_iface[0]);
+	ret = eth_bridge_fdb_add((struct net_eth_addr *)&c, fake_iface[0], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	zassert_equal(fdb_count_all(), 3, "Unexpected FDB entries");
@@ -1162,7 +1162,7 @@ static void test_fdb_ageing(void)
 
 	(void)collect_sent();
 
-	ret = eth_bridge_fdb_add((struct net_eth_addr *)&fixed, fake_iface[2]);
+	ret = eth_bridge_fdb_add((struct net_eth_addr *)&fixed, fake_iface[2], 0, false);
 	zassert_equal(ret, 0, "Cannot add FDB entry (%d)", ret);
 
 	(void)recv_frame_and_collect(0, &station, &peer);
@@ -1218,7 +1218,7 @@ static void test_fdb_learning_table_full(void)
 		      "Frame to a station not learned is not flooded");
 
 	/* A static entry still fits, in place of a learned one */
-	zexpect_equal(eth_bridge_fdb_add((struct net_eth_addr *)&peer, fake_iface[1]), 0,
+	zexpect_equal(eth_bridge_fdb_add((struct net_eth_addr *)&peer, fake_iface[1], 0, false), 0,
 		      "Learned entries keep a static one out");
 	zexpect_equal(fdb_count(fake_iface[1]), 1, "Static entry not added");
 	zexpect_equal(fdb_count_all(), CONFIG_NET_ETHERNET_BRIDGE_FDB_MAX_ENTRIES,

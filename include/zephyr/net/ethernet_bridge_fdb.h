@@ -33,6 +33,10 @@ extern "C" {
  */
 #define ETHERNET_BRIDGE_FDB_FLAG_STATIC  BIT(0) /**< Static entry (manually added) */
 #define ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC BIT(1) /**< Dynamic entry (learned) */
+/** Entry with a port map, held by a device that forwards in hardware.
+ *  Always static, and @ref eth_bridge_fdb_entry.iface is NULL.
+ */
+#define ETHERNET_BRIDGE_FDB_FLAG_HW      BIT(2)
 
 /**
  * @brief FDB entry structure
@@ -40,8 +44,18 @@ extern "C" {
 struct eth_bridge_fdb_entry {
 	/** MAC address */
 	struct net_eth_addr mac;
-	/** Interface */
+	/** Interface, NULL for an entry with @ref ETHERNET_BRIDGE_FDB_FLAG_HW */
 	struct net_if *iface;
+	/** Bridge interface the entry belongs to */
+	struct net_if *bridge;
+	/** Bridge ports the frames for @ref mac go to, bit n for the bridge port n.
+	 *  Only for an entry with @ref ETHERNET_BRIDGE_FDB_FLAG_HW.
+	 */
+	uint32_t portmap;
+	/** The frames for @ref mac are also passed to the host. Only for an
+	 *  entry with @ref ETHERNET_BRIDGE_FDB_FLAG_HW.
+	 */
+	bool host_rx;
 	/** Entry flags */
 	uint8_t flags;
 	/** Uptime in seconds when a frame from @ref mac was last received.
@@ -55,17 +69,39 @@ struct eth_bridge_fdb_entry {
 /**
  * @brief Add a static FDB entry
  *
+ * On a port whose device reports ETHERNET_HW_PORT_FORWARDING the entry is
+ * also programmed into the device, which forwards the frames for @p mac to the
+ * ports of @p portmap and to the host if @p host_rx is set. All the ports of the
+ * bridge must then be of such devices. The entry replaces the one the bridge
+ * has for @p mac. The bridge does not learn into or forward the frames of those
+ * ports itself, and a frame the host sends to @p mac only goes out of the
+ * ports of @p portmap.
+ *
  * @param mac MAC address
- * @param iface Interface
- * @return 0 on success, negative errno on failure
+ * @param iface Interface, a port of the bridge
+ * @param portmap Bridge ports the frames for @p mac go to, bit n for the
+ *                bridge port n, which eth_bridge_get_port_iface() gives for n.
+ *                0 for @p iface alone. Without ETHERNET_HW_PORT_FORWARDING
+ *                it must be 0 or @p iface alone.
+ * @param host_rx The frames are also passed to the host. Needs
+ *                ETHERNET_HW_PORT_FORWARDING.
+ * @retval 0 on success
+ * @retval -EINVAL A bad argument, or @p portmap has a bit of no port
+ * @retval -ENOTSUP @p portmap or @p host_rx without ETHERNET_HW_PORT_FORWARDING
+ *         on every port of the bridge
+ * @retval -ENOMEM The table is full
+ * @return Another negative errno the device gave, the entry is then unchanged
  */
-int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface);
+int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t portmap,
+		       bool host_rx);
 
 /**
  * @brief Delete an FDB entry
  *
  * @param mac MAC address
- * @param iface Interface (NULL to delete from any interface)
+ * @param iface Interface (NULL to delete from any interface). With
+ *              ETHERNET_HW_PORT_FORWARDING the entry of the bridge of @p iface is
+ *              deleted, whatever its ports.
  * @return 0 on success, negative errno on failure
  */
 int eth_bridge_fdb_del(struct net_eth_addr *mac, struct net_if *iface);

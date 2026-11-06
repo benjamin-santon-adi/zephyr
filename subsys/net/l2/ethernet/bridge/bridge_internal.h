@@ -59,6 +59,48 @@ static inline bool eth_bridge_port_is_forwarding(struct net_if *iface)
 }
 
 /**
+ * @brief Check whether a bridged interface forwards with a hardware FDB
+ *
+ * @param iface Ethernet interface
+ *
+ * @return true if the device of @p iface reports ETHERNET_HW_PORT_FORWARDING.
+ */
+bool eth_bridge_port_hw_forwarding(struct net_if *iface);
+
+/**
+ * @brief Get the bit of a bridge port in a port map
+ *
+ * @param iface Ethernet interface bridged by a bridge
+ *
+ * @return The bit of the port of @p iface.
+ */
+uint32_t eth_bridge_port_bit(struct net_if *iface);
+
+/**
+ * @brief Check that a bridge can hold an FDB entry in hardware
+ *
+ * @param br Bridge interface
+ * @param portmap Port map of the entry, 0 to not check it
+ *
+ * @retval 0 Every port of @p br has a device with ETHERNET_HW_PORT_FORWARDING.
+ * @retval -ENOTSUP A port has no such device, or @p br has no port.
+ * @retval -EINVAL @p portmap has a bit of a port that does not exist.
+ */
+int eth_bridge_hw_fdb_check(struct net_if *br, uint32_t portmap);
+
+/**
+ * @brief Give an FDB entry to the devices of a bridge
+ *
+ * @param br Bridge interface
+ * @param type ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET or ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL
+ * @param entry The entry
+ *
+ * @return 0 on success, or the negative errno of the first device that failed.
+ */
+int eth_bridge_hw_fdb_config(struct net_if *br, enum ethernet_config_type type,
+			     const struct ethernet_fdb_entry *entry);
+
+/**
  * @brief Learn the port of a source MAC address
  *
  * Adds a dynamic FDB entry for @p mac on @p iface, or moves an existing
@@ -85,6 +127,19 @@ void eth_bridge_fdb_learn(struct net_if *bridge, struct net_eth_addr *mac, struc
  */
 size_t eth_bridge_fdb_lookup(struct net_if *bridge, const struct net_eth_addr *mac,
 			     struct net_if *ports[], size_t max_ports);
+
+/**
+ * @brief Find the entry with a port map of a destination MAC address
+ *
+ * @param bridge Bridge interface
+ * @param mac Destination MAC address
+ * @param portmap Set to the port map of the entry
+ * @param host_rx Set to whether the host also gets the frames
+ *
+ * @return true if @p bridge has such an entry, false otherwise.
+ */
+bool eth_bridge_fdb_hw_lookup(struct net_if *bridge, const struct net_eth_addr *mac,
+			      uint32_t *portmap, bool *host_rx);
 
 /**
  * @brief Remove FDB entries of a bridge
