@@ -59,11 +59,11 @@ static inline bool eth_bridge_port_is_forwarding(struct net_if *iface)
 }
 
 /**
- * @brief Check whether a bridged interface forwards with a hardware FDB
+ * @brief Check whether a bridged interface is on a bridge that forwards in hardware
  *
  * @param iface Ethernet interface
  *
- * @return true if the device of @p iface reports ETHERNET_HW_PORT_FORWARDING.
+ * @return true if the bridge of @p iface was set with eth_bridge_set_hw_forwarding().
  */
 bool eth_bridge_port_hw_forwarding(struct net_if *iface);
 
@@ -82,23 +82,23 @@ uint32_t eth_bridge_port_bit(struct net_if *iface);
  * @param br Bridge interface
  * @param portmap Port map of the entry, 0 to not check it
  *
- * @retval 0 Every port of @p br has a device with ETHERNET_HW_PORT_FORWARDING.
- * @retval -ENOTSUP A port has no such device, or @p br has no port.
+ * @retval 0 @p br forwards in hardware and has a port.
+ * @retval -ENOTSUP @p br forwards in software, or has no port.
  * @retval -EINVAL @p portmap has a bit of a port that does not exist.
  */
 int eth_bridge_hw_fdb_check(struct net_if *br, uint32_t portmap);
 
 /**
- * @brief Give an FDB entry to the devices of a bridge
+ * @brief Give an FDB entry to the hooks of a bridge
  *
  * @param br Bridge interface
- * @param type ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET or ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL
+ * @param set true to add the entry, false to remove the one of its address
  * @param entry The entry
  *
- * @return 0 on success, or the negative errno of the first device that failed.
+ * @return 0 on success, or the negative errno of the hook.
  */
-int eth_bridge_hw_fdb_config(struct net_if *br, enum ethernet_config_type type,
-			     const struct ethernet_fdb_entry *entry);
+int eth_bridge_hw_fdb_config(struct net_if *br, bool set,
+			     const struct eth_bridge_hw_fdb_entry *entry);
 
 /**
  * @brief Learn the port of a source MAC address

@@ -107,10 +107,70 @@ struct net_if *eth_bridge_get_port_iface(struct net_if *br, size_t port)
 	return ctx->ports[port].iface;
 }
 
+struct free_bridge {
+	struct net_if *iface;
+};
+
+static void free_bridge_cb(struct eth_bridge_iface_context *ctx, void *user_data)
+{
+	struct free_bridge *free_br = user_data;
+
+	if (free_br->iface == NULL && ctx->hw_ops == NULL && ctx->count == 0U) {
+		free_br->iface = ctx->iface;
+	}
+}
+
+struct net_if *eth_bridge_get_free(void)
+{
+	struct free_bridge free_br = {0};
+
+	net_eth_bridge_foreach(free_bridge_cb, &free_br);
+
+	return free_br.iface;
+}
+
+int eth_bridge_set_hw_forwarding(struct net_if *br, const struct eth_bridge_hw_ops *ops,
+				 void *user_data)
+{
+	const struct device *br_dev = net_if_get_device(br);
+	struct eth_bridge_iface_context *ctx;
+
+	NET_ASSERT(br_dev != NULL);
+
+	if (ops == NULL || net_if_l2(br) != &NET_L2_GET_NAME(VIRTUAL) ||
+	    !(net_virtual_get_iface_capabilities(br) & VIRTUAL_INTERFACE_BRIDGE)) {
+		return -EINVAL;
+	}
+
+	ctx = br_dev->data;
+
+	lock_bridge(ctx);
+	ctx->hw_ops = ops;
+	ctx->hw_user_data = user_data;
+	unlock_bridge(ctx);
+
+	return 0;
+}
+
+static bool bridge_hw_forwarding(struct net_if *br)
+{
+	const struct device *dev = net_if_get_device(br);
+	struct eth_bridge_iface_context *ctx = dev->data;
+
+	return ctx->hw_ops != NULL;
+}
+
 bool eth_bridge_port_hw_forwarding(struct net_if *iface)
 {
-	return net_if_l2(iface) == &NET_L2_GET_NAME(ETHERNET) &&
-	       (net_eth_get_hw_capabilities(iface) & ETHERNET_HW_PORT_FORWARDING) != 0;
+	struct ethernet_context *eth_ctx;
+
+	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET)) {
+		return false;
+	}
+
+	eth_ctx = net_if_l2_data(iface);
+
+	return eth_ctx->bridge != NULL && bridge_hw_forwarding(eth_ctx->bridge);
 }
 
 uint32_t eth_bridge_port_bit(struct net_if *iface)
@@ -130,19 +190,17 @@ int eth_bridge_hw_fdb_check(struct net_if *br, uint32_t portmap)
 
 	ctx = dev->data;
 
-	ARRAY_FOR_EACH(ctx->ports, i) {
-		struct net_if *port_iface = ctx->ports[i].iface;
+	if (ctx->hw_ops == NULL) {
+		return -ENOTSUP;
+	}
 
-		if (port_iface == NULL) {
+	ARRAY_FOR_EACH(ctx->ports, i) {
+		if (ctx->ports[i].iface == NULL) {
 			if ((portmap & BIT(i)) != 0U) {
 				return -EINVAL;
 			}
 
 			continue;
-		}
-
-		if (!eth_bridge_port_hw_forwarding(port_iface)) {
-			return -ENOTSUP;
 		}
 
 		ports++;
@@ -151,60 +209,37 @@ int eth_bridge_hw_fdb_check(struct net_if *br, uint32_t portmap)
 	return ports > 0U ? 0 : -ENOTSUP;
 }
 
-int eth_bridge_hw_fdb_config(struct net_if *br, enum ethernet_config_type type,
-			     const struct ethernet_fdb_entry *entry)
+int eth_bridge_hw_fdb_config(struct net_if *br, bool set,
+			     const struct eth_bridge_hw_fdb_entry *entry)
 {
 	const struct device *dev = net_if_get_device(br);
 	struct eth_bridge_iface_context *ctx;
-	struct ethernet_config config = {.fdb_entry = *entry};
-	int ret = 0;
+	int (*hook)(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
+		    void *user_data);
+	int ret;
 
 	NET_ASSERT(dev != NULL);
 
 	ctx = dev->data;
 
-	/* The bridge lock is not taken, as callers hold the FDB lock which the
-	 * bridge lock holders also take. A port is removed from the FDB first.
-	 */
-	ARRAY_FOR_EACH(ctx->ports, i) {
-		struct net_if *port_iface = ctx->ports[i].iface;
-		const struct device *port_dev;
-		const struct ethernet_api *api;
-		bool seen = false;
-
-		if (port_iface == NULL || !eth_bridge_port_hw_forwarding(port_iface)) {
-			continue;
-		}
-
-		port_dev = net_if_get_device(port_iface);
-
-		/* One call for each device, as it programs all its ports */
-		for (size_t j = 0; j < i; j++) {
-			if (ctx->ports[j].iface != NULL &&
-			    net_if_get_device(ctx->ports[j].iface) == port_dev) {
-				seen = true;
-				break;
-			}
-		}
-
-		if (seen) {
-			continue;
-		}
-
-		api = port_dev->api;
-		if (api->set_config == NULL) {
-			return -ENOTSUP;
-		}
-
-		ret = api->set_config(port_dev, port_iface, type, &config);
-		if (ret < 0) {
-			NET_ERR("iface %d: hardware FDB entry failed (%d)",
-				net_if_get_by_iface(port_iface), ret);
-			return ret;
-		}
+	if (ctx->hw_ops == NULL) {
+		return -ENOTSUP;
 	}
 
-	return 0;
+	hook = set ? ctx->hw_ops->fdb_set : ctx->hw_ops->fdb_del;
+	if (hook == NULL) {
+		return -ENOTSUP;
+	}
+
+	/* The bridge lock is not taken, as callers hold the FDB lock which the
+	 * bridge lock holders also take.
+	 */
+	ret = hook(br, entry, ctx->hw_user_data);
+	if (ret < 0) {
+		NET_ERR("bridge %d: hardware FDB entry failed (%d)", net_if_get_by_iface(br), ret);
+	}
+
+	return ret;
 }
 
 int eth_bridge_get_index(struct net_if *br)
@@ -255,6 +290,12 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 	if (eth_ctx->bridge == br) {
 		/* This Ethernet interface was already added to the bridge */
 		found = true;
+	}
+
+	/* The ports of a bridge that forwards in hardware are those of its device */
+	if (ctx->hw_ops != NULL && !found) {
+		unlock_bridge(ctx);
+		return -EBUSY;
 	}
 
 	/* With the spanning tree running, a new port forwards only once the

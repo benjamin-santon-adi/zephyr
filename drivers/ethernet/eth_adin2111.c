@@ -23,6 +23,10 @@ LOG_MODULE_REGISTER(eth_adin2111, CONFIG_ETHERNET_LOG_LEVEL);
 #include "phy/phy_adin2111_priv.h"
 #include "eth_adin2111_priv.h"
 
+#if defined(CONFIG_ETH_ADIN2111_BRIDGE)
+#include <zephyr/net/ethernet_bridge.h>
+#endif
+
 #define DT_DRV_COMPAT adi_adin2111
 
 /* SPI Communication check retry delay */
@@ -1131,6 +1135,161 @@ static int eth_adin2111_clear_mac_filter(const struct device *dev, uint8_t *mac,
 	return adin2111_write_filter_address(dev, cmac, cmac, 0, i);
 }
 
+#if defined(CONFIG_ETH_ADIN2111_BRIDGE)
+/* Slot of the address filter that holds an FDB entry of the bridge, if any, for
+ * the n-th time.
+ */
+static int adin2111_fdb_find_slot(const struct device *dev, const uint8_t *mac, int nth)
+{
+	struct adin2111_data *ctx = dev->data;
+
+	for (int i = ADIN2111_FILTER_FIRST_SLOT; i < ADIN2111_FILTER_SLOTS; i++) {
+		uint32_t upr, lwr;
+		int ret;
+
+		if ((ctx->fdb_slots & BIT(i)) == 0U) {
+			continue;
+		}
+
+		ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_UPR + (i << 1), &upr);
+		if (ret < 0) {
+			return ret;
+		}
+
+		ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_LWR + (i << 1), &lwr);
+		if (ret < 0) {
+			return ret;
+		}
+
+		if ((upr & UINT16_MAX) == sys_get_be16(&mac[0]) && lwr == sys_get_be32(&mac[2]) &&
+		    nth-- == 0) {
+			return i;
+		}
+	}
+
+	return -ENOENT;
+}
+
+/* Set or delete the FDB entry of the bridge in the address filter. A filter
+ * slot applies to the frames received on a port, and sends them to the host
+ * and to the other port, so an entry takes one slot for each port that gets a
+ * different rule.
+ */
+static int adin2111_fdb_entry(const struct device *dev, struct net_if *br, bool set,
+			      const struct eth_bridge_hw_fdb_entry *fdb)
+{
+	struct adin2111_data *ctx = dev->data;
+	uint8_t *mac = (uint8_t *)fdb->mac.addr;
+	uint32_t rules[2] = {0};
+	bool to_port[2] = {false, false};
+	int old[2] = {-ENOENT, -ENOENT};
+	int new[2] = {-ENOENT, -ENOENT};
+	uint16_t picked = 0U;
+	size_t count = 0U;
+	int ret;
+
+	/* The port of a bit of the port map is the one of the interface */
+	for (size_t bit = 0; bit < NET_ETHERNET_BRIDGE_ETH_INTERFACE_COUNT; bit++) {
+		struct net_if *port_iface = eth_bridge_get_port_iface(br, bit);
+
+		for (size_t port = 0; port < ARRAY_SIZE(ctx->port); port++) {
+			struct adin2111_port_data *data;
+
+			if (ctx->port[port] == NULL) {
+				continue;
+			}
+
+			data = ctx->port[port]->data;
+			if (port_iface != NULL && port_iface == data->iface &&
+			    (fdb->portmap & BIT(bit)) != 0U) {
+				to_port[port] = true;
+			}
+		}
+	}
+
+	if (set) {
+		uint32_t host = fdb->host_rx ? ADIN2111_ADDR_TO_HOST : 0U;
+
+		/* A frame received on a port goes to the other port if the entry has it */
+		rules[0] = ADIN2111_ADDR_APPLY2PORT1 | host |
+			   (to_port[1] ? ADIN2111_ADDR_TO_OTHER_PORT : 0U);
+		rules[1] = ADIN2111_ADDR_APPLY2PORT2 | host |
+			   (to_port[0] ? ADIN2111_ADDR_TO_OTHER_PORT : 0U);
+
+		if (rules[0] == (rules[1] ^ ADIN2111_ADDR_APPLY2PORT1 ^ ADIN2111_ADDR_APPLY2PORT2)) {
+			/* The same for both ports, in one slot */
+			rules[0] |= ADIN2111_ADDR_APPLY2PORT2;
+			count = 1U;
+		} else {
+			count = 2U;
+		}
+	}
+
+	old[0] = adin2111_fdb_find_slot(dev, mac, 0);
+	old[1] = adin2111_fdb_find_slot(dev, mac, 1);
+
+	/* Take the slots first, so that a full filter changes nothing */
+	for (size_t i = 0; i < count; i++) {
+		if (old[i] >= 0) {
+			new[i] = old[i];
+			picked |= BIT(old[i]);
+			continue;
+		}
+
+		for (int slot = ADIN2111_FILTER_FIRST_SLOT; slot < ADIN2111_FILTER_SLOTS; slot++) {
+			uint32_t upr;
+
+			if ((picked & BIT(slot)) != 0U) {
+				continue;
+			}
+
+			ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_UPR + (slot << 1),
+						    &upr);
+			if (ret < 0) {
+				return ret;
+			}
+
+			if (upr == 0U) {
+				new[i] = slot;
+				picked |= BIT(slot);
+				break;
+			}
+		}
+
+		if (new[i] < 0) {
+			return -ENOSPC;
+		}
+	}
+
+	for (size_t i = 0; i < count; i++) {
+		ret = adin2111_write_filter_address(dev, mac, NULL, rules[i], new[i]);
+		if (ret < 0) {
+			return ret;
+		}
+
+		ctx->fdb_slots |= BIT(new[i]);
+	}
+
+	/* The slots the entry no longer needs */
+	for (size_t i = count; i < ARRAY_SIZE(old); i++) {
+		uint8_t clear[NET_ETH_ADDR_LEN] = {0};
+
+		if (old[i] < 0) {
+			continue;
+		}
+
+		ret = adin2111_write_filter_address(dev, clear, clear, 0, old[i]);
+		if (ret < 0) {
+			return ret;
+		}
+
+		ctx->fdb_slots &= ~BIT(old[i]);
+	}
+
+	return 0;
+}
+#endif /* CONFIG_ETH_ADIN2111_BRIDGE */
+
 #if defined(CONFIG_NET_PROMISCUOUS_MODE)
 static int eth_adin2111_set_promiscuous(const struct device *dev, const uint16_t port_idx,
 					bool enable)
@@ -1231,13 +1390,6 @@ static enum ethernet_hw_caps adin2111_port_get_capabilities(const struct device 
 		| ETHERNET_LLDP
 #endif
 		| ETHERNET_PROMISC_MODE;
-
-	/* The two ports forward frames with an unknown destination to each
-	 * other, see the CONFIG2 setup in adin2111_init()
-	 */
-	if (adin_cfg->id == ADIN2111_MAC) {
-		caps |= ETHERNET_HW_PORT_FORWARDING;
-	}
 
 	return caps;
 }
@@ -1600,6 +1752,91 @@ static const struct ethernet_api adin2111_port_api = {
 #undef DT_DRV_COMPAT
 #define DT_DRV_COMPAT adi_adin2111
 DT_INST_FOREACH_STATUS_OKAY(ADIN2111_MAC_INIT)
+
+#if defined(CONFIG_ETH_ADIN2111_BRIDGE) && DT_HAS_COMPAT_STATUS_OKAY(adi_adin2111)
+#define ADIN2111_BRIDGE_DEV(inst) DEVICE_DT_INST_GET(inst),
+
+static int adin2111_bridge_fdb(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
+			       void *user_data, bool set)
+{
+	const struct device *adin = user_data;
+	int ret;
+
+	(void)eth_adin2111_lock(adin, K_FOREVER);
+	ret = adin2111_fdb_entry(adin, br, set, entry);
+	(void)eth_adin2111_unlock(adin);
+
+	return ret;
+}
+
+static int adin2111_bridge_fdb_set(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
+				   void *user_data)
+{
+	return adin2111_bridge_fdb(br, entry, user_data, true);
+}
+
+static int adin2111_bridge_fdb_del(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
+				   void *user_data)
+{
+	return adin2111_bridge_fdb(br, entry, user_data, false);
+}
+
+static const struct eth_bridge_hw_ops adin2111_bridge_ops = {
+	.fdb_set = adin2111_bridge_fdb_set,
+	.fdb_del = adin2111_bridge_fdb_del,
+};
+
+/* The two ports forward frames with an unknown destination to each other, see
+ * the CONFIG2 setup in adin2111_init(). A bridge of the two ports forwards in
+ * hardware, so that the bridge does not forward as well.
+ */
+static int adin2111_bridge_init(void)
+{
+	static const struct device *const adins[] = {
+		DT_INST_FOREACH_STATUS_OKAY(ADIN2111_BRIDGE_DEV)
+	};
+
+	for (size_t i = 0; i < ARRAY_SIZE(adins); i++) {
+		struct adin2111_data *ctx = adins[i]->data;
+		struct net_if *br = eth_bridge_get_free();
+		int ret;
+
+		if (br == NULL) {
+			LOG_ERR("%s: no free bridge, see CONFIG_NET_ETHERNET_BRIDGE_COUNT",
+				adins[i]->name);
+			return -ENOMEM;
+		}
+
+		for (size_t port = 0; port < ARRAY_SIZE(ctx->port); port++) {
+			struct adin2111_port_data *data;
+
+			if (ctx->port[port] == NULL) {
+				return -ENODEV;
+			}
+
+			data = ctx->port[port]->data;
+
+			ret = eth_bridge_iface_add(br, data->iface);
+			if (ret < 0) {
+				LOG_ERR("%s: port %zu not added to the bridge, %d",
+					adins[i]->name, port, ret);
+				return ret;
+			}
+		}
+
+		ret = eth_bridge_set_hw_forwarding(br, &adin2111_bridge_ops, (void *)adins[i]);
+		if (ret < 0) {
+			LOG_ERR("%s: bridge forwarding not set, %d", adins[i]->name, ret);
+			return ret;
+		}
+	}
+
+	return 0;
+}
+
+/* After the network interfaces and the bridges are initialized */
+SYS_INIT(adin2111_bridge_init, APPLICATION, CONFIG_ETH_ADIN2111_BRIDGE_INIT_PRIORITY);
+#endif /* CONFIG_ETH_ADIN2111_BRIDGE */
 
 #define ADIN1110_MAC_INIT(inst)	ADIN2111_MAC_INITIALIZE(inst, ADIN1110_MAC, 1, adin1110)	\
 	/* ports */										\

@@ -63,6 +63,42 @@ struct eth_bridge_port {
 	atomic_t state;
 };
 
+/** @endcond */
+
+/**
+ * @brief FDB entry of a bridge that forwards in hardware
+ */
+struct eth_bridge_hw_fdb_entry {
+	/** Destination MAC address, unicast or multicast */
+	struct net_eth_addr mac;
+	/** Bridge ports the frames for @ref mac are sent out of, bit n for the
+	 *  port n, whose interface eth_bridge_get_port_iface() returns
+	 */
+	uint32_t portmap;
+	/** The frames for @ref mac are also passed to the host */
+	bool host_rx;
+};
+
+/**
+ * @brief Hooks of a device that forwards between the ports of a bridge
+ *
+ * Called with the FDB locked, so they must not call the FDB functions.
+ */
+struct eth_bridge_hw_ops {
+	/** Add the entry, or replace the one for its address.
+	 *  Returns 0 or a negative errno.
+	 */
+	int (*fdb_set)(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
+		       void *user_data);
+	/** Remove the entry of the address, only the address of @p entry is set.
+	 *  Returns 0 or a negative errno.
+	 */
+	int (*fdb_del)(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
+		       void *user_data);
+};
+
+/** @cond INTERNAL_HIDDEN */
+
 struct eth_bridge_iface_context {
 	/* Lock to protect access to the port array below */
 	struct k_mutex lock;
@@ -75,6 +111,14 @@ struct eth_bridge_iface_context {
 
 	/* How many interfaces are bridged atm */
 	size_t count;
+
+	/* Hooks of the device that forwards between the ports in hardware, NULL
+	 * if the bridge forwards in software
+	 */
+	const struct eth_bridge_hw_ops *hw_ops;
+
+	/* Passed to the hooks */
+	void *hw_user_data;
 
 	/* Bridge instance id */
 	int id;
@@ -120,6 +164,34 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface);
  * @return 0 if OK, negative error code otherwise.
  */
 int eth_bridge_iface_remove(struct net_if *br, struct net_if *iface);
+
+/**
+ * @brief Get a bridge interface that is not in use
+ *
+ * Returns a bridge without ports that does not forward in hardware, for a
+ * driver to bridge its ports at start up.
+ *
+ * @return The bridge interface, or NULL if there is none.
+ */
+struct net_if *eth_bridge_get_free(void);
+
+/**
+ * @brief Tell that a bridge forwards between its ports in hardware
+ *
+ * The ports of @p br are those of one device, which forwards the frames
+ * between them, with its FDB. The bridge then neither learns from nor forwards
+ * the frames of its ports: it passes to the host the ones the device delivers.
+ * The FDB entries of the bridge are given to @p ops. Call it once the ports
+ * are added, as no other interface can be added to the bridge then.
+ *
+ * @param br A pointer to a bridge interface
+ * @param ops Hooks of the device, which must stay valid
+ * @param user_data Passed to the hooks
+ *
+ * @return 0 if OK, negative error code otherwise.
+ */
+int eth_bridge_set_hw_forwarding(struct net_if *br, const struct eth_bridge_hw_ops *ops,
+				 void *user_data);
 
 /**
  * @brief Get the Ethernet interface of a bridge port

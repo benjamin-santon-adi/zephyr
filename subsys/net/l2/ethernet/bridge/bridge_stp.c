@@ -464,8 +464,12 @@ bool eth_bridge_stp_port_supported(struct net_if *iface)
 {
 	enum ethernet_hw_caps caps = net_eth_get_hw_capabilities(iface);
 
-	return (caps & ETHERNET_HW_STP_PORT_STATE) != 0 ||
-	       (caps & (ETHERNET_DSA_USER_PORT | ETHERNET_HW_PORT_FORWARDING)) == 0;
+	if ((caps & ETHERNET_HW_STP_PORT_STATE) != 0) {
+		return true;
+	}
+
+	return (caps & ETHERNET_DSA_USER_PORT) == 0 &&
+	       !eth_bridge_port_hw_forwarding(iface);
 }
 
 void eth_bridge_stp_port_added(struct eth_bridge_iface_context *ctx, size_t index)

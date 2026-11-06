@@ -61,7 +61,7 @@ struct fake_port {
 	atomic_t data_tx;
 	uint8_t last_bpdu[MAX_FRAME];
 	size_t last_bpdu_len;
-	/* Report ETHERNET_HW_PORT_FORWARDING */
+	/* Report ETHERNET_DSA_USER_PORT, a port that forwards in hardware */
 	bool hw_forwarding;
 	/* Report ETHERNET_HW_STP_PORT_STATE */
 	bool hw_stp;
@@ -196,7 +196,7 @@ static enum ethernet_hw_caps fake_get_capabilities(const struct device *dev, str
 	ARG_UNUSED(iface);
 
 	return ETHERNET_PROMISC_MODE | ETHERNET_LINK_100BASE |
-	       (fake_of(dev)->hw_forwarding ? ETHERNET_HW_PORT_FORWARDING : 0) |
+	       (fake_of(dev)->hw_forwarding ? ETHERNET_DSA_USER_PORT : 0) |
 	       (fake_of(dev)->hw_stp ? ETHERNET_HW_STP_PORT_STATE : 0);
 }
 

@@ -55,4 +55,23 @@ config ETH_ADIN2111_BUFFER_SIZE
 	help
 	  Transmission and reception buffer size.
 
+config ETH_ADIN2111_BRIDGE
+	bool "Bridge the two ports of the ADIN2111"
+	default y
+	depends on NET_ETHERNET_BRIDGE
+	help
+	  Bridge the two ports of each ADIN2111 with a bridge interface, which
+	  takes one of CONFIG_NET_ETHERNET_BRIDGE_COUNT. The device forwards
+	  the frames between its ports, the bridge only passes to the host the
+	  ones it delivers and gives it the FDB entries. The bridge is not
+	  started, bring it up as any bridge.
+
+config ETH_ADIN2111_BRIDGE_INIT_PRIORITY
+	int "Initialization priority of the port bridge"
+	depends on ETH_ADIN2111_BRIDGE
+	default 90
+	help
+	  Priority, in the APPLICATION level, of the bridging of the ports.
+	  It must run once the network interfaces are initialized.
+
 endif # ETH_ADIN2111

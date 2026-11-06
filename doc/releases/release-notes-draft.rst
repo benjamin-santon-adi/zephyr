@@ -102,9 +102,8 @@ Libraries / Subsystems
       ``NET_EVENT_ETHERNET_BRIDGE_PORT_STATE``, ``NET_EVENT_ETHERNET_BRIDGE_NEW_ROOT`` and
       ``NET_EVENT_ETHERNET_BRIDGE_TOPOLOGY_CHANGE`` net_mgmt events report port role and state
       changes, a new root bridge and the start of a topology change. The protocol does not
-      run on ports that forward frames in hardware, DSA switch ports and Ethernet devices that
-      report the new :c:enumerator:`ETHERNET_HW_PORT_FORWARDING` capability, as it cannot
-      block them, unless the device also reports the new
+      run on ports that forward frames in hardware, DSA switch ports and ports of a bridge set
+      with :c:func:`eth_bridge_set_hw_forwarding`, as it cannot block them, unless the device also reports the new
       :c:enumerator:`ETHERNET_HW_STP_PORT_STATE` capability and takes the port state and FDB
       flushes from the protocol.
 

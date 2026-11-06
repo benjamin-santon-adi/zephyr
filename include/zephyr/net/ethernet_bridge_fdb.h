@@ -69,8 +69,8 @@ struct eth_bridge_fdb_entry {
 /**
  * @brief Add a static FDB entry
  *
- * On a port whose device reports ETHERNET_HW_PORT_FORWARDING the entry is
- * also programmed into the device, which forwards the frames for @p mac to the
+ * On a port whose device reports a bridge set with eth_bridge_set_hw_forwarding() the entry is
+ * also given to the hooks of the bridge, for the device to forward the frames for @p mac to the
  * ports of @p portmap and to the host if @p host_rx is set. All the ports of the
  * bridge must then be of such devices. The entry replaces the one the bridge
  * has for @p mac. The bridge does not learn into or forward the frames of those
@@ -81,13 +81,13 @@ struct eth_bridge_fdb_entry {
  * @param iface Interface, a port of the bridge
  * @param portmap Bridge ports the frames for @p mac go to, bit n for the
  *                bridge port n, which eth_bridge_get_port_iface() gives for n.
- *                0 for @p iface alone. Without ETHERNET_HW_PORT_FORWARDING
+ *                0 for @p iface alone. Without a bridge set with eth_bridge_set_hw_forwarding()
  *                it must be 0 or @p iface alone.
  * @param host_rx The frames are also passed to the host. Needs
- *                ETHERNET_HW_PORT_FORWARDING.
+ *                a bridge set with eth_bridge_set_hw_forwarding().
  * @retval 0 on success
  * @retval -EINVAL A bad argument, or @p portmap has a bit of no port
- * @retval -ENOTSUP @p portmap or @p host_rx without ETHERNET_HW_PORT_FORWARDING
+ * @retval -ENOTSUP @p portmap or @p host_rx without a bridge set with eth_bridge_set_hw_forwarding()
  *         on every port of the bridge
  * @retval -ENOMEM The table is full
  * @return Another negative errno the device gave, the entry is then unchanged
@@ -100,7 +100,7 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t 
  *
  * @param mac MAC address
  * @param iface Interface (NULL to delete from any interface). With
- *              ETHERNET_HW_PORT_FORWARDING the entry of the bridge of @p iface is
+ *              a bridge set with eth_bridge_set_hw_forwarding() the entry of the bridge of @p iface is
  *              deleted, whatever its ports.
  * @return 0 on success, negative errno on failure
  */

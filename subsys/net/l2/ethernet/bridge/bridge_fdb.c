@@ -28,17 +28,17 @@ static int fdb_iface_index(const struct eth_bridge_fdb_entry *entry)
 	return entry->iface != NULL ? net_if_get_by_iface(entry->iface) : 0;
 }
 
-/* Give an entry with a port map to the devices of its bridge */
-static int fdb_hw_config(const struct eth_bridge_fdb_entry *entry, enum ethernet_config_type type)
+/* Give an entry with a port map to the hooks of its bridge */
+static int fdb_hw_config(const struct eth_bridge_fdb_entry *entry, bool set)
 {
-	struct ethernet_fdb_entry hw_entry = {
+	struct eth_bridge_hw_fdb_entry hw_entry = {
 		.portmap = entry->portmap,
 		.host_rx = entry->host_rx,
 	};
 
 	memcpy(&hw_entry.mac, &entry->mac, sizeof(hw_entry.mac));
 
-	return eth_bridge_hw_fdb_config(entry->bridge, type, &hw_entry);
+	return eth_bridge_hw_fdb_config(entry->bridge, set, &hw_entry);
 }
 
 static void fdb_remove(sys_snode_t *prev, struct eth_bridge_fdb_entry *entry)
@@ -49,7 +49,7 @@ static void fdb_remove(sys_snode_t *prev, struct eth_bridge_fdb_entry *entry)
 
 	if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U) {
 		/* The device is told, whatever it answers: the entry is gone here */
-		(void)fdb_hw_config(entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_DEL);
+		(void)fdb_hw_config(entry, false);
 	}
 
 	sys_slist_remove(&fdb_entries, prev, &entry->node);
@@ -130,7 +130,7 @@ static int fdb_add_hw(struct net_if *bridge, const struct net_eth_addr *mac, uin
 			goto out;
 		}
 
-		ret = fdb_hw_config(&new_entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET);
+		ret = fdb_hw_config(&new_entry, true);
 		if (ret < 0) {
 			k_mem_slab_free(&fdb_slab, (void *)found);
 			goto out;
@@ -140,7 +140,7 @@ static int fdb_add_hw(struct net_if *bridge, const struct net_eth_addr *mac, uin
 		sys_slist_prepend(&fdb_entries, &found->node);
 		fdb_count++;
 	} else {
-		ret = fdb_hw_config(&new_entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET);
+		ret = fdb_hw_config(&new_entry, true);
 		if (ret < 0) {
 			goto out;
 		}
@@ -333,7 +333,7 @@ int eth_bridge_fdb_del_iface(struct net_if *iface)
 					continue;
 				}
 
-				(void)fdb_hw_config(entry, ETHERNET_CONFIG_TYPE_FDB_ENTRY_SET);
+				(void)fdb_hw_config(entry, true);
 			}
 
 			prev = node;

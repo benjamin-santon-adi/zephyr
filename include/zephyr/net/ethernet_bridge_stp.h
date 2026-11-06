@@ -184,8 +184,8 @@ struct eth_bridge_stp_topology_event {
  *
  * The protocol blocks a port by not forwarding frames from and to it in
  * software. A port whose device forwards frames to its other ports in
- * hardware (ETHERNET_DSA_USER_PORT or ETHERNET_HW_PORT_FORWARDING) cannot be
- * blocked that way, unless the device also reports
+ * hardware (ETHERNET_DSA_USER_PORT, or a port of a bridge set with
+ * eth_bridge_set_hw_forwarding()) cannot be blocked that way, unless the device also reports
  * ETHERNET_HW_STP_PORT_STATE: the protocol then sets the port state and
  * flushes the learned addresses in hardware too. Without it the protocol
  * does not start on a bridge with such a port, and such a port cannot be
