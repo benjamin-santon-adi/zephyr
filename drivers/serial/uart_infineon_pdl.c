@@ -319,7 +319,11 @@ static inline uint32_t ifx_uart_divider(uint32_t freq, uint32_t baud, uint32_t o
 
 static inline uint32_t ifx_uart_mem_width(uint32_t data_width)
 {
-#if defined(CONFIG_SOC_FAMILY_INFINEON_PSOC4)
+#if defined(CONFIG_UART_INFINEON_PDL_BYTE_WIDTH_ONLY)
+	/* SCB v2 (M0S8) has no MEM_WIDTH field, byte-width only */
+	ARG_UNUSED(data_width);
+	return 0U;
+#elif defined(CONFIG_SOC_FAMILY_INFINEON_PSOC4)
 	return (data_width <= CY_SCB_BYTE_WIDTH) ? CY_SCB_CTRL_MEM_WIDTH_BYTE
 						 : CY_SCB_CTRL_MEM_WIDTH_HALFWORD;
 #else
@@ -1691,7 +1695,10 @@ static int ifx_cat1_uart_init(const struct device *dev)
 #endif
 
 #if defined(CONFIG_INFINEON_INTC_SYSINTC)
-	irq_enable(config->irq_num);
+	/* Only interrupt-driven instances install a handler */
+	if (IS_ENABLED(CONFIG_UART_INTERRUPT_DRIVEN)) {
+		irq_enable(config->irq_num);
+	}
 #endif /* CONFIG_INFINEON_INTC_SYSINTC */
 
 #if !defined(CONFIG_CLOCK_CONTROL_IFX_PERI_CLOCK_V2)
@@ -1705,7 +1712,10 @@ static int ifx_cat1_uart_init(const struct device *dev)
 					     &(data->context));
 
 	if (result == CY_RSLT_SUCCESS) {
-		irq_enable(config->irq_num);
+		/* Only interrupt-driven instances install a handler */
+		if (IS_ENABLED(CONFIG_UART_INTERRUPT_DRIVEN)) {
+			irq_enable(config->irq_num);
+		}
 
 		Cy_SCB_UART_Enable(config->reg_addr);
 	} else {
@@ -1841,7 +1851,10 @@ static int ifx_cat1_uart_pm_action(const struct device *dev, enum pm_device_acti
 		ifx_cat1_uart_dma_trigmux_connect(dev);
 #endif
 
-		irq_enable(config->irq_num);
+		/* Only interrupt-driven instances install a handler */
+		if (IS_ENABLED(CONFIG_UART_INTERRUPT_DRIVEN)) {
+			irq_enable(config->irq_num);
+		}
 		break;
 	}
 #endif /* CONFIG_PM_S2RAM || CONFIG_PM_DEVICE_POWER_DOMAIN */
