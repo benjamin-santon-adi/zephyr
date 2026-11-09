@@ -18,6 +18,7 @@ LOG_MODULE_REGISTER(net_config, CONFIG_NET_CONFIG_LOG_LEVEL);
 #include <zephyr/logging/log_backend.h>
 #include <zephyr/logging/log_backend_net.h>
 #include <zephyr/net/ethernet.h>
+#include <zephyr/net/ethernet_bridge.h>
 #include <zephyr/net/net_core.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/net_if.h>
@@ -487,6 +488,17 @@ static void iface_find_cb(struct net_if *iface, void *user_data)
 	}
 }
 
+#if defined(CONFIG_NET_ETHERNET_BRIDGE)
+static void bridge_find_cb(struct eth_bridge_iface_context *br, void *user_data)
+{
+	struct net_if **iface_to_use = user_data;
+
+	if (*iface_to_use == NULL && br->iface != NULL && br->count > 0) {
+		*iface_to_use = br->iface;
+	}
+}
+#endif /* CONFIG_NET_ETHERNET_BRIDGE */
+
 int net_config_init_app(const struct device *dev, const char *app_info)
 {
 	struct net_if *iface = NULL;
@@ -506,7 +518,17 @@ int net_config_init_app(const struct device *dev, const char *app_info)
 		NET_ERR("Cannot setup IEEE 802.15.4 interface (%d)", ret);
 	}
 
-	/* Only try to use a network interface that is auto started */
+	/* Prefer the bridge, which owns the IP configuration of its ports */
+	if (iface == NULL && IS_ENABLED(CONFIG_NET_ETHERNET_BRIDGE)) {
+		net_eth_bridge_foreach(bridge_find_cb, &iface);
+	}
+
+	/* Then the default network interface */
+	if (iface == NULL) {
+		iface = net_if_get_default();
+	}
+
+	/* Finally, any network interface that is auto started */
 	if (iface == NULL) {
 		net_if_foreach(iface_find_cb, &iface);
 	}

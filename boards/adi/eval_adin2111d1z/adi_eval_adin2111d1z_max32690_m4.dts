@@ -149,7 +149,7 @@
 		};
 
 		port2 {
-			local-mac-address = [00 aa 22 fe da c8];
+			local-mac-address = [00 aa 22 fe da d8];
 			status = "okay";
 		};
 

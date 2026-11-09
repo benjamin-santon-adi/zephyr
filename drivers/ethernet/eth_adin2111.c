@@ -25,6 +25,7 @@ LOG_MODULE_REGISTER(eth_adin2111, CONFIG_ETHERNET_LOG_LEVEL);
 
 #if defined(CONFIG_ETH_ADIN2111_BRIDGE)
 #include <zephyr/net/ethernet_bridge.h>
+#include <zephyr/net/virtual.h>
 #endif
 
 #define DT_DRV_COMPAT adi_adin2111
@@ -1866,6 +1867,18 @@ static int adin2111_bridge_init(void)
 		ret = eth_bridge_set_hw_forwarding(br, &adin2111_bridge_ops, (void *)adins[i]);
 		if (ret < 0) {
 			LOG_ERR("%s: bridge forwarding not set, %d", adins[i]->name, ret);
+			return ret;
+		}
+
+		net_virtual_set_name(br, "host");
+
+		/* The bridge is NO_AUTO_START, so nothing else brings it up. Do it
+		 * once the ports are members, so that the bridge, not the ports,
+		 * runs the IPv4 start (ACD, autoconf), and DHCP, if enabled.
+		 */
+		ret = net_if_up(br);
+		if (ret < 0 && ret != -EALREADY) {
+			LOG_ERR("%s: bridge not up, %d", adins[i]->name, ret);
 			return ret;
 		}
 	}

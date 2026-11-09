@@ -10,8 +10,8 @@ configdefault ETH_DRIVER
 
 if ETH_ADIN2111
 
-configdefault NET_IF_MAX_IPV4_COUNT
-	default 2
+configdefault NET_ETHERNET_BRIDGE
+	default y
 
 endif # ETH_ADIN2111
 
