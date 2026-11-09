@@ -1418,8 +1418,6 @@ static void adin2111_port_iface_init(struct net_if *iface)
 static enum ethernet_hw_caps adin2111_port_get_capabilities(const struct device *dev,
 							    struct net_if *iface __unused)
 {
-	const struct adin2111_port_config *cfg = dev->config;
-	const struct adin2111_config *adin_cfg = cfg->adin->config;
 	enum ethernet_hw_caps caps;
 
 	caps = ETHERNET_LINK_10BASE |
