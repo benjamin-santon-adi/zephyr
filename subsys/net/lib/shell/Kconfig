@@ -199,6 +199,11 @@ config NET_SHELL_VIRTUAL_SUPPORTED
 	default y
 	depends on NET_SHELL_SHOW_DISABLED_COMMANDS || NET_L2_VIRTUAL
 
+config NET_SHELL_SWITCH_SUPPORTED
+	bool "Ethernet switch config"
+	default y
+	depends on NET_SHELL_SHOW_DISABLED_COMMANDS || NET_L2_ETHERNET
+
 config NET_SHELL_VLAN_SUPPORTED
 	bool "Virtual LAN config"
 	default y

@@ -46,9 +46,9 @@ extern "C" {
  */
 struct ethernet_switch_port_map {
 	/** Ports the frames are forwarded to: a bit per port index */
-	uint32_t forward: 31;
+	uint32_t forward;
 	/** The frames are received by the host, on the interface of the port they came in by */
-	bool receive : 1;
+	bool receive;
 };
 
 /**
