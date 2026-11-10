@@ -1666,7 +1666,6 @@ static int adin2111_filtering_entry_set(const struct device *dev,
 {
 	const uint32_t ports = adin2111_switch_ports_mask(dev);
 	uint32_t port_rules[2] = { 0U, 0U };
-	uint32_t apply[2] = { 0U, 0U };
 	size_t groups = 0U;
 	int ret;
 
@@ -1682,6 +1681,7 @@ static int adin2111_filtering_entry_set(const struct device *dev,
 	}
 
 	if (set) {
+		/* The rules of the frames received on each port come from the port-map */
 		for (uint8_t port = 0U; port < 2U; port++) {
 			if ((ports & BIT(port)) == 0U) {
 				continue;
@@ -1694,19 +1694,16 @@ static int adin2111_filtering_entry_set(const struct device *dev,
 			}
 		}
 
-		/* The ports with the same rules share an entry of the table */
 		if (ports == (BIT(0) | BIT(1)) && port_rules[0] == port_rules[1]) {
-			apply[0] = ADIN2111_ADDR_APPLY2PORT1 | ADIN2111_ADDR_APPLY2PORT2;
-			port_rules[0] |= apply[0];
+			/* The same rules on both ports share an entry of the table */
+			port_rules[0] |= ADIN2111_ADDR_APPLY2PORT1 | ADIN2111_ADDR_APPLY2PORT2;
 			groups = 1U;
 		} else {
-			apply[0] = ADIN2111_ADDR_APPLY2PORT1;
-			port_rules[0] |= apply[0];
+			port_rules[0] |= ADIN2111_ADDR_APPLY2PORT1;
 			groups = 1U;
 
 			if (ports == (BIT(0) | BIT(1))) {
-				apply[1] = ADIN2111_ADDR_APPLY2PORT2;
-				port_rules[1] |= apply[1];
+				port_rules[1] |= ADIN2111_ADDR_APPLY2PORT2;
 				groups = 2U;
 			}
 		}
