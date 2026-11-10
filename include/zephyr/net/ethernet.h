@@ -210,6 +210,11 @@ enum ethernet_hw_caps {
 	 *  @ref ethernet_stp_port_state.
 	 */
 	ETHERNET_HW_STP_PORT_STATE	= BIT(22),
+
+	/** The interface is the switch interface of a device with several ports.
+	 *  Its device API is a @ref ethernet_switch_api.
+	 */
+	ETHERNET_SWITCH			= BIT(23),
 };
 
 /** @cond INTERNAL_HIDDEN */

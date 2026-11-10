@@ -274,6 +274,8 @@ struct adin2111_switch_fdb_entry {
 	uint8_t mac[6];
 	uint8_t port_idx;
 	bool used;
+	/* Set by the user: never learned over, never aged, never evicted */
+	bool is_static;
 	int64_t last_seen;
 };
 
@@ -281,6 +283,8 @@ struct adin2111_switch_data {
 	struct net_if *iface;
 	uint8_t mac_addr[6];
 	struct k_spinlock fdb_lock;
+	/* Seconds without a frame before a learned station is forgotten, 0 never */
+	uint32_t ageing_time;
 	struct adin2111_switch_fdb_entry fdb[CONFIG_ETH_ADIN2111_SWITCH_FDB_SIZE];
 #if defined(CONFIG_NET_STATISTICS_ETHERNET)
 	struct net_stats_eth stats;

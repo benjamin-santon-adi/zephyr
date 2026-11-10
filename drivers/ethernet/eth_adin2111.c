@@ -18,6 +18,8 @@ LOG_MODULE_REGISTER(eth_adin2111, CONFIG_ETHERNET_LOG_LEVEL);
 #include <errno.h>
 
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/lldp.h>
+#include <zephyr/net/ethernet_switch.h>
 #include <zephyr/drivers/ethernet/eth_adin2111.h>
 
 #include "phy/phy_adin2111_priv.h"
@@ -65,6 +67,12 @@ LOG_MODULE_REGISTER(eth_adin2111, CONFIG_ETHERNET_LOG_LEVEL);
 #define ADIN2111_ETH_HDR_LEN			14U
 #define ADIN2111_ETH_PTYPE_PTP			0x88F7U
 #define ADIN2111_ETH_PTYPE_LLDP			0x88CCU
+#define ADIN2111_ETH_PTYPE_VLAN			0x8100U
+#define ADIN2111_ETH_PTYPE_QINQ			0x88A8U
+/* The tag protocol and control information that follow the addresses */
+#define ADIN2111_ETH_VLAN_TAG_LEN		4U
+/* The ports of the chip, as the bits of a port mask */
+#define ADIN2111_SWITCH_PORTS			(BIT(0) | BIT(1))
 #endif
 
 /* As per RM rev. A table 3, t3 >= 50ms, delay for SPI interface to be ready */
@@ -134,23 +142,39 @@ static inline bool adin2111_is_group_addr(const uint8_t *mac)
 	return (mac[0] & 0x01U) != 0U;
 }
 
-/* The frames of the protocols that run on a port: the link-local range, gPTP,
- * LLDP, and what is sent to the address of the port itself.
+/* The frames of the protocols that run on a link, such as STP, LLDP and gPTP: the
+ * link-local address range, and the gPTP and LLDP ethertypes, also behind a VLAN tag.
+ * They belong to a port, never to the switch interface.
  */
-static bool adin2111_is_port_frame(const struct adin2111_port_data *port, const uint8_t *frame)
+static bool adin2111_is_link_frame(const uint8_t *frame, size_t len)
 {
 	const uint8_t link_local[] = { 0x01, 0x80, 0xC2, 0x00, 0x00 };
-	const uint16_t ptype = sys_get_be16(&frame[12]);
+	uint16_t ptype;
+
+	if (len < ADIN2111_ETH_HDR_LEN) {
+		return false;
+	}
 
 	if (memcmp(frame, link_local, sizeof(link_local)) == 0 && (frame[5] & 0xF0U) == 0U) {
 		return true;
 	}
 
-	if (ptype == ADIN2111_ETH_PTYPE_PTP || ptype == ADIN2111_ETH_PTYPE_LLDP) {
-		return true;
+	ptype = sys_get_be16(&frame[12]);
+	if ((ptype == ADIN2111_ETH_PTYPE_VLAN || ptype == ADIN2111_ETH_PTYPE_QINQ) &&
+	    len >= ADIN2111_ETH_HDR_LEN + ADIN2111_ETH_VLAN_TAG_LEN) {
+		/* The ethertype of the frame follows the tag control information */
+		ptype = sys_get_be16(&frame[ADIN2111_ETH_HDR_LEN + 2U]);
 	}
 
-	return memcmp(frame, port->mac_addr, sizeof(port->mac_addr)) == 0;
+	return ptype == ADIN2111_ETH_PTYPE_PTP || ptype == ADIN2111_ETH_PTYPE_LLDP;
+}
+
+/* What a port keeps: the link protocols, and what is sent to the address of the port itself */
+static bool adin2111_is_port_frame(const struct adin2111_port_data *port, const uint8_t *frame,
+				   size_t len)
+{
+	return adin2111_is_link_frame(frame, len) ||
+	       memcmp(frame, port->mac_addr, sizeof(port->mac_addr)) == 0;
 }
 
 static void adin2111_switch_fdb_learn(struct adin2111_switch_data *sw, const uint8_t *mac,
@@ -177,21 +201,123 @@ static void adin2111_switch_fdb_learn(struct adin2111_switch_data *sw, const uin
 			if (unused == NULL) {
 				unused = e;
 			}
-		} else if (oldest == NULL || e->last_seen < oldest->last_seen) {
+		} else if (!e->is_static && (oldest == NULL || e->last_seen < oldest->last_seen)) {
 			oldest = e;
 		}
 	}
 
+	if (match != NULL && match->is_static) {
+		/* The user has pinned the station to a port */
+		k_spin_unlock(&sw->fdb_lock, key);
+		return;
+	}
+
 	if (match == NULL) {
 		match = (unused != NULL) ? unused : oldest;
+		if (match == NULL) {
+			/* The table only holds static entries */
+			k_spin_unlock(&sw->fdb_lock, key);
+			return;
+		}
+
 		memcpy(match->mac, mac, sizeof(match->mac));
 		match->used = true;
+		match->is_static = false;
 	}
 
 	match->port_idx = port_idx;
 	match->last_seen = k_uptime_get();
 
 	k_spin_unlock(&sw->fdb_lock, key);
+}
+
+/* Pin a station to a port, or move an entry that is already there */
+static int adin2111_switch_fdb_add_static(struct adin2111_switch_data *sw, const uint8_t *mac,
+					  uint8_t port_idx)
+{
+	struct adin2111_switch_fdb_entry *match = NULL;
+	struct adin2111_switch_fdb_entry *unused = NULL;
+	struct adin2111_switch_fdb_entry *oldest = NULL;
+	k_spinlock_key_t key;
+
+	key = k_spin_lock(&sw->fdb_lock);
+
+	ARRAY_FOR_EACH_PTR(sw->fdb, e) {
+		if (e->used && memcmp(e->mac, mac, sizeof(e->mac)) == 0) {
+			match = e;
+			break;
+		}
+
+		if (!e->used) {
+			if (unused == NULL) {
+				unused = e;
+			}
+		} else if (!e->is_static && (oldest == NULL || e->last_seen < oldest->last_seen)) {
+			oldest = e;
+		}
+	}
+
+	if (match == NULL) {
+		match = (unused != NULL) ? unused : oldest;
+		if (match == NULL) {
+			k_spin_unlock(&sw->fdb_lock, key);
+			return -ENOSPC;
+		}
+
+		memcpy(match->mac, mac, sizeof(match->mac));
+		match->used = true;
+	}
+
+	match->is_static = true;
+	match->port_idx = port_idx;
+	match->last_seen = k_uptime_get();
+
+	k_spin_unlock(&sw->fdb_lock, key);
+
+	return 0;
+}
+
+/* Remove a static entry, the learned ones are left to the ageing */
+static int adin2111_switch_fdb_del_static(struct adin2111_switch_data *sw, const uint8_t *mac)
+{
+	k_spinlock_key_t key;
+	int ret = -ENOENT;
+
+	key = k_spin_lock(&sw->fdb_lock);
+
+	ARRAY_FOR_EACH_PTR(sw->fdb, e) {
+		if (e->used && e->is_static && memcmp(e->mac, mac, sizeof(e->mac)) == 0) {
+			e->used = false;
+			e->is_static = false;
+			ret = 0;
+			break;
+		}
+	}
+
+	k_spin_unlock(&sw->fdb_lock, key);
+
+	return ret;
+}
+
+static void adin2111_switch_fdb_flush(struct adin2111_switch_data *sw, bool include_static)
+{
+	k_spinlock_key_t key = k_spin_lock(&sw->fdb_lock);
+
+	ARRAY_FOR_EACH_PTR(sw->fdb, e) {
+		if (include_static || !e->is_static) {
+			e->used = false;
+			e->is_static = false;
+		}
+	}
+
+	k_spin_unlock(&sw->fdb_lock, key);
+}
+
+static bool adin2111_switch_fdb_aged(const struct adin2111_switch_data *sw,
+				     const struct adin2111_switch_fdb_entry *e)
+{
+	return !e->is_static && sw->ageing_time != 0U &&
+	       (k_uptime_get() - e->last_seen) > ((int64_t)sw->ageing_time * MSEC_PER_SEC);
 }
 
 /* Returns the port of a station, or -ENOENT when it is unknown or has aged out */
@@ -207,8 +333,7 @@ static int adin2111_switch_fdb_lookup(struct adin2111_switch_data *sw, const uin
 			continue;
 		}
 
-		if ((k_uptime_get() - e->last_seen) >
-		    ((int64_t)CONFIG_ETH_ADIN2111_SWITCH_FDB_AGEING_TIME * MSEC_PER_SEC)) {
+		if (adin2111_switch_fdb_aged(sw, e)) {
 			e->used = false;
 		} else {
 			ret = e->port_idx;
@@ -276,7 +401,7 @@ static struct net_if *adin2111_rx_iface(const struct device *adin, const uint16_
 	if (ctx->sw != NULL && len >= ADIN2111_ETH_HDR_LEN) {
 		struct adin2111_switch_data *sw = ctx->sw->data;
 
-		if (sw->iface != NULL && !adin2111_is_port_frame(port, frame)) {
+		if (sw->iface != NULL && !adin2111_is_port_frame(port, frame, len)) {
 			if (!ctx->oa) {
 				adin2111_switch_fdb_learn(sw, &frame[6], port_idx);
 			}
@@ -1322,6 +1447,60 @@ static int eth_adin2111_clear_mac_filter(const struct device *dev, uint8_t *mac,
 	return adin2111_write_filter_address(dev, cmac, cmac, 0, i);
 }
 
+#if defined(CONFIG_ETH_ADIN2111_SWITCH_IFACE)
+/* Find the entry of an address for exactly the ports in apply, or -ENOENT */
+static int adin2111_find_filter_exact(const struct device *dev, const uint8_t *mac,
+				      const uint32_t apply)
+{
+	uint32_t reg;
+	int ret;
+
+	for (int i = ADIN2111_FILTER_FIRST_SLOT; i < ADIN2111_FILTER_SLOTS; i++) {
+		const int offset = i << 1;
+
+		ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_UPR + offset, &reg);
+		if (ret < 0) {
+			return ret;
+		}
+
+		if ((reg & UINT16_MAX) != sys_get_be16(&mac[0]) ||
+		    (reg & (ADIN2111_ADDR_APPLY2PORT1 | ADIN2111_ADDR_APPLY2PORT2)) != apply) {
+			continue;
+		}
+
+		ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_LWR + offset, &reg);
+		if (ret < 0) {
+			return ret;
+		}
+
+		if (reg == sys_get_be32(&mac[2])) {
+			return i;
+		}
+	}
+
+	return -ENOENT;
+}
+
+static int adin2111_find_free_filter(const struct device *dev)
+{
+	uint32_t reg;
+	int ret;
+
+	for (int i = ADIN2111_FILTER_FIRST_SLOT; i < ADIN2111_FILTER_SLOTS; i++) {
+		ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_UPR + (i << 1), &reg);
+		if (ret < 0) {
+			return ret;
+		}
+
+		if (reg == 0U) {
+			return i;
+		}
+	}
+
+	return -ENOSPC;
+}
+#endif /* CONFIG_ETH_ADIN2111_SWITCH_IFACE */
+
 #if defined(CONFIG_NET_PROMISCUOUS_MODE)
 static int eth_adin2111_set_promiscuous(const struct device *dev, const uint16_t port_idx,
 					bool enable)
@@ -1778,6 +1957,12 @@ static int adin2111_switch_send(const struct device *dev, struct net_pkt *pkt)
 	int ret = -ENETDOWN;
 	bool sent = false;
 
+	/* The link protocols go out by the port interfaces, with the address of the port */
+	if (pkt->frags != NULL && adin2111_is_link_frame(pkt->frags->data, pkt->frags->len)) {
+		LOG_DBG("Link protocol frame refused on the switch interface");
+		return -EINVAL;
+	}
+
 	if (!adin2111_is_group_addr(hdr->dst.addr)) {
 		port = adin2111_switch_fdb_lookup(data, hdr->dst.addr);
 	}
@@ -1839,6 +2024,15 @@ static void adin2111_switch_iface_init(struct net_if *iface)
 	ethernet_init(iface);
 	net_if_carrier_off(iface);
 
+	/* The link protocols run on the ports. ethernet_init() enables LLDP on
+	 * every interface, but there is no link for the switch interface to
+	 * advertise. gPTP only attaches to an interface with a PTP clock, which
+	 * this one has none of, and nothing delivers the other frames to it.
+	 */
+	if (IS_ENABLED(CONFIG_NET_LLDP)) {
+		net_lldp_unset_lldpdu(iface);
+	}
+
 	adin2111_iface_init_done(adin);
 }
 
@@ -1847,7 +2041,7 @@ static enum ethernet_hw_caps adin2111_switch_get_capabilities(const struct devic
 {
 	ARG_UNUSED(dev);
 
-	return ETHERNET_LINK_10BASE;
+	return ETHERNET_LINK_10BASE | ETHERNET_SWITCH;
 }
 
 static int adin2111_switch_set_config(const struct device *dev, struct net_if *iface __unused,
@@ -1895,14 +2089,196 @@ static struct net_stats_eth *adin2111_switch_get_stats(const struct device *dev,
 }
 #endif /* CONFIG_NET_STATISTICS_ETHERNET */
 
-static const struct ethernet_api adin2111_switch_api = {
-	.iface_api.init = adin2111_switch_iface_init,
-	.get_capabilities = adin2111_switch_get_capabilities,
-	.set_config = adin2111_switch_set_config,
-	.send = adin2111_switch_send,
+static int adin2111_switch_fdb_add(const struct device *dev, struct net_if *iface __unused,
+				   const struct net_eth_addr *mac_address, uint8_t port_idx)
+{
+	struct adin2111_switch_data *sw = dev->data;
+	const uint8_t zero[NET_ETH_ADDR_LEN] = { 0 };
+
+	if (mac_address == NULL || port_idx > 1U ||
+	    adin2111_is_group_addr(mac_address->addr) ||
+	    memcmp(mac_address->addr, zero, sizeof(zero)) == 0) {
+		return -EINVAL;
+	}
+
+	return adin2111_switch_fdb_add_static(sw, mac_address->addr, port_idx);
+}
+
+static int adin2111_switch_fdb_del(const struct device *dev, struct net_if *iface __unused,
+				   const struct net_eth_addr *mac_address)
+{
+	struct adin2111_switch_data *sw = dev->data;
+
+	if (mac_address == NULL) {
+		return -EINVAL;
+	}
+
+	return adin2111_switch_fdb_del_static(sw, mac_address->addr);
+}
+
+static int adin2111_switch_fdb_flush_all(const struct device *dev, struct net_if *iface __unused,
+					 bool include_static)
+{
+	adin2111_switch_fdb_flush(dev->data, include_static);
+
+	return 0;
+}
+
+static int adin2111_switch_fdb_foreach(const struct device *dev, struct net_if *iface __unused,
+				       ethernet_switch_fdb_cb_t cb, void *user_data)
+{
+	struct adin2111_switch_data *sw = dev->data;
+
+	if (cb == NULL) {
+		return -EINVAL;
+	}
+
+	/* The callback is called without the lock, so it can use the other operations */
+	ARRAY_FOR_EACH(sw->fdb, i) {
+		struct ethernet_switch_fdb_entry entry = { 0 };
+		bool valid = false;
+		k_spinlock_key_t key = k_spin_lock(&sw->fdb_lock);
+		const struct adin2111_switch_fdb_entry *e = &sw->fdb[i];
+
+		if (e->used && !adin2111_switch_fdb_aged(sw, e)) {
+			memcpy(entry.mac_address.addr, e->mac, sizeof(e->mac));
+			entry.port_idx = e->port_idx;
+			entry.is_static = e->is_static;
+			entry.age = e->is_static ? 0U :
+				    (uint32_t)((k_uptime_get() - e->last_seen) / MSEC_PER_SEC);
+			valid = true;
+		}
+
+		k_spin_unlock(&sw->fdb_lock, key);
+
+		if (valid) {
+			cb(&entry, user_data);
+		}
+	}
+
+	return 0;
+}
+
+static int adin2111_switch_set_ageing(const struct device *dev, struct net_if *iface __unused,
+				      uint32_t seconds)
+{
+	struct adin2111_switch_data *sw = dev->data;
+	k_spinlock_key_t key = k_spin_lock(&sw->fdb_lock);
+
+	sw->ageing_time = seconds;
+	k_spin_unlock(&sw->fdb_lock, key);
+
+	return 0;
+}
+
+static int adin2111_switch_get_ageing(const struct device *dev, struct net_if *iface __unused,
+				      uint32_t *seconds)
+{
+	struct adin2111_switch_data *sw = dev->data;
+	k_spinlock_key_t key;
+
+	if (seconds == NULL) {
+		return -EINVAL;
+	}
+
+	key = k_spin_lock(&sw->fdb_lock);
+	*seconds = sw->ageing_time;
+	k_spin_unlock(&sw->fdb_lock, key);
+
+	return 0;
+}
+
+static int adin2111_switch_filter_set(const struct device *dev, struct net_if *iface __unused,
+				      const struct ethernet_switch_filter *filter, bool set)
+{
+	const struct adin2111_switch_config *cfg = dev->config;
+	const struct device *adin = cfg->adin;
+	uint32_t apply = 0U;
+	uint32_t rules;
+	int slot;
+
+	if (filter == NULL || filter->ports == 0U || (filter->ports & ~ADIN2111_SWITCH_PORTS) != 0U ||
+	    (filter->action & ~(ETHERNET_SWITCH_FILTER_TO_HOST |
+				ETHERNET_SWITCH_FILTER_TO_OTHER_PORT)) != 0U) {
+		return -EINVAL;
+	}
+
+	if ((filter->ports & BIT(0)) != 0U) {
+		apply |= ADIN2111_ADDR_APPLY2PORT1;
+	}
+
+	if ((filter->ports & BIT(1)) != 0U) {
+		apply |= ADIN2111_ADDR_APPLY2PORT2;
+	}
+
+	rules = apply;
+	if ((filter->action & ETHERNET_SWITCH_FILTER_TO_HOST) != 0U) {
+		rules |= ADIN2111_ADDR_TO_HOST;
+	}
+
+	if ((filter->action & ETHERNET_SWITCH_FILTER_TO_OTHER_PORT) != 0U) {
+		rules |= ADIN2111_ADDR_TO_OTHER_PORT;
+	}
+
+	(void)eth_adin2111_lock(adin, K_FOREVER);
+
+	/* An address has one entry per set of ports, a new rule replaces it */
+	slot = adin2111_find_filter_exact(adin, filter->mac_address.addr, apply);
+
+	if (set) {
+		if (slot == -ENOENT) {
+			slot = adin2111_find_free_filter(adin);
+		}
+
+		if (slot >= 0) {
+			/* Entries past the second have no mask, so it is an exact match */
+			slot = adin2111_write_filter_address(adin,
+							     (uint8_t *)filter->mac_address.addr,
+							     NULL, rules, slot);
+		}
+	} else if (slot >= 0) {
+		uint8_t zero[NET_ETH_ADDR_LEN] = { 0 };
+
+		slot = adin2111_write_filter_address(adin, zero, zero, 0, slot);
+	}
+
+	(void)eth_adin2111_unlock(adin);
+
+	return slot;
+}
+
+static struct net_if *adin2111_switch_get_port_iface(const struct device *dev,
+						     struct net_if *iface __unused,
+						     uint8_t port_idx)
+{
+	const struct adin2111_switch_config *cfg = dev->config;
+	struct adin2111_data *ctx = cfg->adin->data;
+
+	if (port_idx >= ARRAY_SIZE(ctx->port) || ctx->port[port_idx] == NULL) {
+		return NULL;
+	}
+
+	return ((struct adin2111_port_data *)ctx->port[port_idx]->data)->iface;
+}
+
+static const struct ethernet_switch_api adin2111_switch_api = {
+	.eth_api = {
+		.iface_api.init = adin2111_switch_iface_init,
+		.get_capabilities = adin2111_switch_get_capabilities,
+		.set_config = adin2111_switch_set_config,
+		.send = adin2111_switch_send,
 #if defined(CONFIG_NET_STATISTICS_ETHERNET)
-	.get_stats = adin2111_switch_get_stats,
+		.get_stats = adin2111_switch_get_stats,
 #endif /* CONFIG_NET_STATISTICS_ETHERNET */
+	},
+	.fdb_add = adin2111_switch_fdb_add,
+	.fdb_del = adin2111_switch_fdb_del,
+	.fdb_flush = adin2111_switch_fdb_flush_all,
+	.fdb_foreach = adin2111_switch_fdb_foreach,
+	.set_ageing = adin2111_switch_set_ageing,
+	.get_ageing = adin2111_switch_get_ageing,
+	.filter_set = adin2111_switch_filter_set,
+	.get_port_iface = adin2111_switch_get_port_iface,
 };
 #endif /* CONFIG_ETH_ADIN2111_SWITCH_IFACE */
 
@@ -1993,6 +2369,7 @@ struct net_if *eth_adin2111_get_switch_iface(const struct device *dev)
 #define ADIN2111_SWITCH_DEVICE_INIT_INSTANCE(adin_n, name) \
 	static struct adin2111_switch_data name##_switch_data_##adin_n = { \
 		.mac_addr = DT_PROP(ADIN2111_SWITCH_NODE(adin_n), local_mac_address), \
+		.ageing_time = CONFIG_ETH_ADIN2111_SWITCH_FDB_AGEING_TIME, \
 	}; \
 	static const struct adin2111_switch_config name##_switch_config_##adin_n = { \
 		.adin = DEVICE_DT_INST_GET(adin_n), \
