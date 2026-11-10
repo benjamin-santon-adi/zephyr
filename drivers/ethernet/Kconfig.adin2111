@@ -59,6 +59,7 @@ config ETH_ADIN2111_BRIDGE
 	bool "Bridge the two ports of the ADIN2111"
 	default y
 	depends on NET_ETHERNET_BRIDGE
+	select NET_ETHERNET_BRIDGE_HW
 	help
 	  Bridge the two ports of each ADIN2111 with a bridge interface, which
 	  takes one of CONFIG_NET_ETHERNET_BRIDGE_COUNT. The device forwards
@@ -73,7 +74,7 @@ config ETH_ADIN2111_BRIDGE
 config ETH_ADIN2111_BRIDGE_INIT_PRIORITY
 	int "Initialization priority of the port bridge"
 	depends on ETH_ADIN2111_BRIDGE
-	default 90
+	default 60
 	help
 	  Priority, in the APPLICATION level, of the bridging of the ports.
 	  It must run once the network interfaces are initialized.

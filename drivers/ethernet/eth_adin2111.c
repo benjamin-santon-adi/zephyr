@@ -23,9 +23,15 @@ LOG_MODULE_REGISTER(eth_adin2111, CONFIG_ETHERNET_LOG_LEVEL);
 #include "phy/phy_adin2111_priv.h"
 #include "eth_adin2111_priv.h"
 
+/* The ADIN2111 forwards between its ports, which a bridge of them uses */
+#if defined(CONFIG_ETH_ADIN2111_BRIDGE) && DT_HAS_COMPAT_STATUS_OKAY(adi_adin2111)
+#define ADIN2111_HW_BRIDGE 1
+#else
+#define ADIN2111_HW_BRIDGE 0
+#endif
+
 #if defined(CONFIG_ETH_ADIN2111_BRIDGE)
 #include <zephyr/net/ethernet_bridge.h>
-#include <zephyr/net/virtual.h>
 #endif
 
 #define DT_DRV_COMPAT adi_adin2111
@@ -667,6 +673,17 @@ static inline void adin2111_port_on_phyint(const struct device *dev)
 	}
 
 	net_eth_carrier_set(data->iface, state.is_up);
+
+#if ADIN2111_HW_BRIDGE
+	{
+		struct adin2111_data *ctx = cfg->adin->data;
+
+		if (ctx->bridge != NULL) {
+			/* From the PHY state, as net_eth_carrier_set() is applied later */
+			eth_bridge_hw_link_set(ctx->bridge, cfg->port_idx, state.is_up);
+		}
+	}
+#endif /* ADIN2111_HW_BRIDGE */
 }
 
 static void adin2111_offload_thread(void *p1, void *p2, void *p3)
@@ -1382,6 +1399,15 @@ static void adin2111_port_iface_init(struct net_if *iface)
 	ethernet_init(iface);
 	net_if_carrier_off(iface);
 
+	/* The ports are members of the bridge, that owns the IP configuration.
+	 * The ports still auto start, as the bridge needs them up.
+	 */
+	if (IS_ENABLED(CONFIG_ETH_ADIN2111_BRIDGE) &&
+	    ((const struct adin2111_config *)adin->config)->id == ADIN2111_MAC) {
+		net_if_flag_clear(iface, NET_IF_IPV4);
+		net_if_flag_clear(iface, NET_IF_IPV6);
+	}
+
 	--ctx->ifaces_left_to_init;
 
 	/* if all ports are initialized */
@@ -1743,7 +1769,96 @@ static const struct ethernet_api adin2111_port_api = {
 
 #define ADIN2111_SPI_OPERATION									\
 	((uint16_t)(SPI_OP_MODE_CONTROLLER | SPI_TRANSFER_MSB | SPI_WORD_SET(8)))
-#define ADIN2111_MAC_INITIALIZE(inst, dev_id, ifaces, name)					\
+#if ADIN2111_HW_BRIDGE
+static int adin2111_bridge_set_config(const struct device *adin,
+				      enum eth_bridge_hw_config_type type,
+				      const struct eth_bridge_hw_config *config)
+{
+	int ret;
+
+	(void)eth_adin2111_lock(adin, K_FOREVER);
+
+	switch (type) {
+	case ETH_BRIDGE_HW_CONFIG_TYPE_FORWARDING:
+		ret = adin2111_set_forwarding(adin, config->forwarding);
+		break;
+	case ETH_BRIDGE_HW_CONFIG_TYPE_FDB_SET:
+		ret = adin2111_fdb_entry(adin, config->br, true, &config->fdb);
+		break;
+	case ETH_BRIDGE_HW_CONFIG_TYPE_FDB_DEL:
+		ret = adin2111_fdb_entry(adin, config->br, false, &config->fdb);
+		break;
+	default:
+		ret = -ENOTSUP;
+		break;
+	}
+
+	(void)eth_adin2111_unlock(adin);
+
+	return ret;
+}
+
+static int adin2111_bridge_get_config(const struct device *adin,
+				      enum eth_bridge_hw_config_type type,
+				      struct eth_bridge_hw_config *config)
+{
+	struct adin2111_data *ctx = adin->data;
+
+	if (type != ETH_BRIDGE_HW_CONFIG_TYPE_FORWARDING) {
+		return -ENOTSUP;
+	}
+
+	config->forwarding = ctx->forwarding;
+
+	return 0;
+}
+
+static size_t adin2111_bridge_get_number_iface(const struct device *adin)
+{
+	struct adin2111_data *ctx = adin->data;
+
+	return ARRAY_SIZE(ctx->port);
+}
+
+static struct net_if *adin2111_bridge_get_port_iface(const struct device *adin, size_t port)
+{
+	struct adin2111_data *ctx = adin->data;
+	struct adin2111_port_data *data;
+
+	if (port >= ARRAY_SIZE(ctx->port) || ctx->port[port] == NULL) {
+		return NULL;
+	}
+
+	data = ctx->port[port]->data;
+
+	return data->iface;
+}
+
+static const struct eth_bridge_hw_api adin2111_bridge_api = {
+	.set_config = adin2111_bridge_set_config,
+	.get_config = adin2111_bridge_get_config,
+	.get_number_iface = adin2111_bridge_get_number_iface,
+	.get_port_iface = adin2111_bridge_get_port_iface,
+};
+
+/* The device forwards the frames between its two ports only with a bridge of
+ * them, which then forwards in hardware and not in software. Without it, the
+ * ports are plain ports, that a software bridge can use.
+ */
+#define ADIN2111_BRIDGE_DEFINE(inst)								\
+	ETH_BRIDGE_HW_DEFINE(adin2111_bridge_##inst, DEVICE_DT_INST_GET(inst),			\
+			     &adin2111_bridge_api, CONFIG_ETH_ADIN2111_BRIDGE_INIT_PRIORITY);
+
+DT_INST_FOREACH_STATUS_OKAY(ADIN2111_BRIDGE_DEFINE)
+
+#define ADIN2111_BRIDGE_REF(inst) ETH_BRIDGE_HW_GET(adin2111_bridge_##inst)
+#define ADIN2111_DATA_BRIDGE(_ref) .bridge = _ref,
+#else
+#define ADIN2111_BRIDGE_REF(inst) NULL
+#define ADIN2111_DATA_BRIDGE(_ref)
+#endif /* ADIN2111_HW_BRIDGE */
+
+#define ADIN2111_MAC_INITIALIZE(inst, dev_id, ifaces, name, bridge_ref)					\
 	ADIN2111_DEF_BUF(name##_buffer_##inst, CONFIG_ETH_ADIN2111_BUFFER_SIZE);		\
 	COND_CODE_1(DT_INST_PROP(inst, spi_oa),							\
 	(											\
@@ -1758,6 +1873,7 @@ static const struct ethernet_api adin2111_port_api = {
 	};											\
 	static struct adin2111_data name##_data_##inst = {					\
 		.ifaces_left_to_init = ifaces,							\
+		ADIN2111_DATA_BRIDGE(bridge_ref)							\
 		.port = {},									\
 		.offload_sem = Z_SEM_INITIALIZER(name##_data_##inst.offload_sem, 0, 1),		\
 		.lock = Z_MUTEX_INITIALIZER(name##_data_##inst.lock),				\
@@ -1776,7 +1892,8 @@ static const struct ethernet_api adin2111_port_api = {
 			 POST_KERNEL, CONFIG_ETH_INIT_PRIORITY,					\
 			 NULL);
 
-#define ADIN2111_MAC_INIT(inst)	ADIN2111_MAC_INITIALIZE(inst, ADIN2111_MAC, 2, adin2111)	\
+#define ADIN2111_MAC_INIT(inst)	ADIN2111_MAC_INITIALIZE(inst, ADIN2111_MAC, 2, adin2111,\
+				 ADIN2111_BRIDGE_REF(inst))	\
 	/* ports */										\
 	ADIN2111_PORT_DEVICE_INIT_INSTANCE(inst, 0, 1, adin2111)				\
 	ADIN2111_PORT_DEVICE_INIT_INSTANCE(inst, 1, 2, adin2111)
@@ -1785,112 +1902,7 @@ static const struct ethernet_api adin2111_port_api = {
 #define DT_DRV_COMPAT adi_adin2111
 DT_INST_FOREACH_STATUS_OKAY(ADIN2111_MAC_INIT)
 
-#if defined(CONFIG_ETH_ADIN2111_BRIDGE) && DT_HAS_COMPAT_STATUS_OKAY(adi_adin2111)
-#define ADIN2111_BRIDGE_DEV(inst) DEVICE_DT_INST_GET(inst),
-
-static int adin2111_bridge_fdb(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
-			       void *user_data, bool set)
-{
-	const struct device *adin = user_data;
-	int ret;
-
-	(void)eth_adin2111_lock(adin, K_FOREVER);
-	ret = adin2111_fdb_entry(adin, br, set, entry);
-	(void)eth_adin2111_unlock(adin);
-
-	return ret;
-}
-
-static int adin2111_bridge_fdb_set(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
-				   void *user_data)
-{
-	return adin2111_bridge_fdb(br, entry, user_data, true);
-}
-
-static int adin2111_bridge_fdb_del(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
-				   void *user_data)
-{
-	return adin2111_bridge_fdb(br, entry, user_data, false);
-}
-
-static const struct eth_bridge_hw_ops adin2111_bridge_ops = {
-	.fdb_set = adin2111_bridge_fdb_set,
-	.fdb_del = adin2111_bridge_fdb_del,
-};
-
-/* The device forwards the frames between its two ports only with a bridge of
- * them, which then forwards in hardware and not in software. Without it, the
- * ports are plain ports, that a software bridge can use.
- */
-static int adin2111_bridge_init(void)
-{
-	static const struct device *const adins[] = {
-		DT_INST_FOREACH_STATUS_OKAY(ADIN2111_BRIDGE_DEV)
-	};
-
-	for (size_t i = 0; i < ARRAY_SIZE(adins); i++) {
-		struct adin2111_data *ctx = adins[i]->data;
-		struct net_if *br = eth_bridge_get_free();
-		int ret;
-
-		if (br == NULL) {
-			LOG_ERR("%s: no free bridge, see CONFIG_NET_ETHERNET_BRIDGE_COUNT",
-				adins[i]->name);
-			return -ENOMEM;
-		}
-
-		for (size_t port = 0; port < ARRAY_SIZE(ctx->port); port++) {
-			struct adin2111_port_data *data;
-
-			if (ctx->port[port] == NULL) {
-				return -ENODEV;
-			}
-
-			data = ctx->port[port]->data;
-
-			ret = eth_bridge_iface_add(br, data->iface);
-			if (ret < 0) {
-				LOG_ERR("%s: port %zu not added to the bridge, %d",
-					adins[i]->name, port, ret);
-				return ret;
-			}
-		}
-
-		(void)eth_adin2111_lock(adins[i], K_FOREVER);
-		ret = adin2111_set_forwarding(adins[i], true);
-		(void)eth_adin2111_unlock(adins[i]);
-		if (ret < 0) {
-			LOG_ERR("%s: forwarding not set, %d", adins[i]->name, ret);
-			return ret;
-		}
-
-		ret = eth_bridge_set_hw_forwarding(br, &adin2111_bridge_ops, (void *)adins[i]);
-		if (ret < 0) {
-			LOG_ERR("%s: bridge forwarding not set, %d", adins[i]->name, ret);
-			return ret;
-		}
-
-		net_virtual_set_name(br, "host");
-
-		/* The bridge is NO_AUTO_START, so nothing else brings it up. Do it
-		 * once the ports are members, so that the bridge, not the ports,
-		 * runs the IPv4 start (ACD, autoconf), and DHCP, if enabled.
-		 */
-		ret = net_if_up(br);
-		if (ret < 0 && ret != -EALREADY) {
-			LOG_ERR("%s: bridge not up, %d", adins[i]->name, ret);
-			return ret;
-		}
-	}
-
-	return 0;
-}
-
-/* After the network interfaces and the bridges are initialized */
-SYS_INIT(adin2111_bridge_init, APPLICATION, CONFIG_ETH_ADIN2111_BRIDGE_INIT_PRIORITY);
-#endif /* CONFIG_ETH_ADIN2111_BRIDGE */
-
-#define ADIN1110_MAC_INIT(inst)	ADIN2111_MAC_INITIALIZE(inst, ADIN1110_MAC, 1, adin1110)	\
+#define ADIN1110_MAC_INIT(inst)	ADIN2111_MAC_INITIALIZE(inst, ADIN1110_MAC, 1, adin1110, NULL)	\
 	/* ports */										\
 	ADIN2111_PORT_DEVICE_INIT_INSTANCE(inst, 0, 1, adin1110)
 

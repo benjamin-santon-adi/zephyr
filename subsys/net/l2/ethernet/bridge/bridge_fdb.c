@@ -22,12 +22,6 @@ static size_t fdb_count;
 K_MEM_SLAB_DEFINE_STATIC_TYPE(fdb_slab, struct eth_bridge_fdb_entry,
 			      CONFIG_NET_ETHERNET_BRIDGE_FDB_MAX_ENTRIES);
 
-/* Index of the interface of an entry, 0 for an entry with a port map */
-static int fdb_iface_index(const struct eth_bridge_fdb_entry *entry)
-{
-	return entry->iface != NULL ? net_if_get_by_iface(entry->iface) : 0;
-}
-
 /* Give an entry with a port map to the hooks of its bridge */
 static int fdb_hw_config(const struct eth_bridge_fdb_entry *entry, bool set)
 {
@@ -43,9 +37,9 @@ static int fdb_hw_config(const struct eth_bridge_fdb_entry *entry, bool set)
 
 static void fdb_remove(sys_snode_t *prev, struct eth_bridge_fdb_entry *entry)
 {
-	NET_DBG("FDB entry removed: %02x:%02x:%02x:%02x:%02x:%02x -> iface %d", entry->mac.addr[0],
+	NET_DBG("FDB entry removed: %02x:%02x:%02x:%02x:%02x:%02x -> ports 0x%x", entry->mac.addr[0],
 		entry->mac.addr[1], entry->mac.addr[2], entry->mac.addr[3], entry->mac.addr[4],
-		entry->mac.addr[5], fdb_iface_index(entry));
+		entry->mac.addr[5], entry->portmap);
 
 	if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U) {
 		/* The device is told, whatever it answers: the entry is gone here */
@@ -159,17 +153,23 @@ out:
 	return ret;
 }
 
-int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t portmap,
-		       bool host_rx)
+int eth_bridge_fdb_add(struct net_if *iface, const struct eth_bridge_fdb_params *params)
 {
 	struct eth_bridge_fdb_entry *entry;
 	struct net_if *bridge;
+	struct net_eth_addr *mac;
+	uint32_t portmap;
+	bool host_rx;
 	int ret = 0;
 
-	/* Check mac and iface is valid or not */
-	if (mac == NULL || iface == NULL) {
+	/* Check params, mac and iface is valid or not */
+	if (params == NULL || params->mac == NULL || iface == NULL) {
 		return -EINVAL;
 	}
+
+	mac = params->mac;
+	portmap = params->portmap;
+	host_rx = params->host_rx;
 
 	if (!net_eth_iface_is_bridged(net_if_l2_data(iface))) {
 		return -EINVAL;
@@ -198,7 +198,7 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t 
 		    memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) == 0 &&
 		    entry->bridge == bridge) {
 
-			if (entry->iface == iface) {
+			if (entry->portmap == portmap) {
 				/* A learned entry becomes static */
 				entry->flags = ETHERNET_BRIDGE_FDB_FLAG_STATIC;
 				NET_DBG("FDB entry exists");
@@ -207,12 +207,12 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t 
 
 			/* For unicast address, just update it */
 			if (net_eth_is_addr_valid(mac)) {
-				entry->iface = iface;
+				entry->portmap = portmap;
 				entry->flags = ETHERNET_BRIDGE_FDB_FLAG_STATIC;
-				NET_DBG("FDB entry updated: %02x:%02x:%02x:%02x:%02x:%02x -> iface "
-					"%d",
+				NET_DBG("FDB entry updated: %02x:%02x:%02x:%02x:%02x:%02x -> ports "
+					"0x%x",
 					mac->addr[0], mac->addr[1], mac->addr[2], mac->addr[3],
-					mac->addr[4], mac->addr[5], net_if_get_by_iface(iface));
+					mac->addr[4], mac->addr[5], portmap);
 				goto out;
 			}
 		}
@@ -238,9 +238,8 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t 
 
 	/* Initialize entry */
 	memcpy(&entry->mac, mac, sizeof(struct net_eth_addr));
-	entry->iface = iface;
 	entry->bridge = bridge;
-	entry->portmap = 0U;
+	entry->portmap = portmap;
 	entry->host_rx = false;
 	entry->flags = ETHERNET_BRIDGE_FDB_FLAG_STATIC;
 
@@ -248,27 +247,36 @@ int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t 
 	sys_slist_prepend(&fdb_entries, &entry->node);
 	fdb_count++;
 
-	NET_DBG("FDB entry added: %02x:%02x:%02x:%02x:%02x:%02x -> iface %d", mac->addr[0],
-		mac->addr[1], mac->addr[2], mac->addr[3], mac->addr[4], mac->addr[5],
-		net_if_get_by_iface(iface));
+	NET_DBG("FDB entry added: %02x:%02x:%02x:%02x:%02x:%02x -> ports 0x%x", mac->addr[0],
+		mac->addr[1], mac->addr[2], mac->addr[3], mac->addr[4], mac->addr[5], portmap);
 out:
 	k_mutex_unlock(&fdb_lock);
 	return ret;
 }
 
-int eth_bridge_fdb_del(struct net_eth_addr *mac, struct net_if *iface)
+int eth_bridge_fdb_del(struct net_if *iface, const struct eth_bridge_fdb_params *params)
 {
 	struct eth_bridge_fdb_entry *entry;
 	sys_snode_t *node, *next, *prev = NULL;
+	struct net_eth_addr *mac;
+	struct net_if *bridge = NULL;
+	uint32_t bit = 0U;
 	int ret = -ENOENT;
 
-	/* A NULL iface deletes the address from every interface */
-	if (mac == NULL) {
+	if (params == NULL || params->mac == NULL) {
 		return -EINVAL;
 	}
 
-	if (iface != NULL && net_eth_get_bridge(net_if_l2_data(iface)) == NULL) {
-		return -EINVAL;
+	mac = params->mac;
+
+	/* A NULL iface deletes the address from every interface */
+	if (iface != NULL) {
+		bridge = net_eth_get_bridge(net_if_l2_data(iface));
+		if (bridge == NULL) {
+			return -EINVAL;
+		}
+
+		bit = eth_bridge_port_bit(iface);
 	}
 
 	k_mutex_lock(&fdb_lock, K_FOREVER);
@@ -279,9 +287,9 @@ int eth_bridge_fdb_del(struct net_eth_addr *mac, struct net_if *iface)
 		/* An entry with a port map belongs to the bridge, not to a port */
 		if (memcmp(&entry->mac, mac, sizeof(struct net_eth_addr)) != 0 ||
 		    (iface != NULL &&
-		     ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U ?
-		      entry->bridge != net_eth_get_bridge(net_if_l2_data(iface)) :
-		      entry->iface != iface))) {
+		     (entry->bridge != bridge ||
+		      ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) == 0U &&
+		       entry->portmap != bit)))) {
 			prev = node;
 			continue;
 		}
@@ -340,7 +348,7 @@ int eth_bridge_fdb_del_iface(struct net_if *iface)
 			continue;
 		}
 
-		if (iface != NULL && entry->iface != iface) {
+		if (iface != NULL && (entry->bridge != bridge || entry->portmap != bit)) {
 			prev = node;
 			continue;
 		}
@@ -412,6 +420,7 @@ static void fdb_ageing_handler(struct k_work *work)
 void eth_bridge_fdb_learn(struct net_if *bridge, struct net_eth_addr *mac, struct net_if *iface)
 {
 	struct eth_bridge_fdb_entry *entry;
+	uint32_t bit = eth_bridge_port_bit(iface);
 
 	/* Only a unicast source identifies a station, and a frame with the
 	 * bridge's own address as source is not from a station behind a port.
@@ -432,11 +441,11 @@ void eth_bridge_fdb_learn(struct net_if *bridge, struct net_eth_addr *mac, struc
 
 		/* A static entry is never changed by what is received */
 		if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC) != 0U) {
-			if (entry->iface != iface) {
+			if (entry->portmap != bit) {
 				NET_DBG("FDB move %02x:%02x:%02x:%02x:%02x:%02x -> iface %d",
 					mac->addr[0], mac->addr[1], mac->addr[2], mac->addr[3],
 					mac->addr[4], mac->addr[5], net_if_get_by_iface(iface));
-				entry->iface = iface;
+				entry->portmap = bit;
 			}
 
 			entry->last_seen = k_uptime_seconds();
@@ -452,9 +461,8 @@ void eth_bridge_fdb_learn(struct net_if *bridge, struct net_eth_addr *mac, struc
 	}
 
 	memcpy(&entry->mac, mac, sizeof(struct net_eth_addr));
-	entry->iface = iface;
 	entry->bridge = bridge;
-	entry->portmap = 0U;
+	entry->portmap = bit;
 	entry->host_rx = false;
 	entry->flags = ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC;
 	entry->last_seen = k_uptime_seconds();
@@ -477,6 +485,7 @@ size_t eth_bridge_fdb_lookup(struct net_if *bridge, const struct net_eth_addr *m
 			     struct net_if *ports[], size_t max_ports)
 {
 	struct eth_bridge_fdb_entry *entry;
+	struct net_if *port;
 	size_t count = 0;
 
 	k_mutex_lock(&fdb_lock, K_FOREVER);
@@ -488,8 +497,14 @@ size_t eth_bridge_fdb_lookup(struct net_if *bridge, const struct net_eth_addr *m
 			continue;
 		}
 
+		/* An entry without a port map has exactly one port */
+		port = eth_bridge_get_port_iface(bridge, find_lsb_set(entry->portmap) - 1);
+		if (port == NULL) {
+			continue;
+		}
+
 		if (count < max_ports) {
-			ports[count] = entry->iface;
+			ports[count] = port;
 		}
 
 		count++;
@@ -504,6 +519,7 @@ void eth_bridge_fdb_flush(struct net_if *bridge, struct net_if *iface, bool dyna
 {
 	struct eth_bridge_fdb_entry *entry;
 	sys_snode_t *node, *next, *prev = NULL;
+	uint32_t bit = (iface != NULL) ? eth_bridge_port_bit(iface) : 0U;
 
 	k_mutex_lock(&fdb_lock, K_FOREVER);
 
@@ -511,7 +527,8 @@ void eth_bridge_fdb_flush(struct net_if *bridge, struct net_if *iface, bool dyna
 		entry = CONTAINER_OF(node, struct eth_bridge_fdb_entry, node);
 
 		if (entry->bridge != bridge ||
-		    (iface != NULL && entry->iface != iface) ||
+		    (iface != NULL && ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U ||
+				       entry->portmap != bit)) ||
 		    (dynamic_only && (entry->flags & ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC) == 0U)) {
 			prev = node;
 			continue;

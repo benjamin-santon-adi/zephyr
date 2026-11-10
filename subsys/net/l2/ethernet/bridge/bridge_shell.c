@@ -290,7 +290,11 @@ static int cmd_bridge_fdb_add(const struct shell *sh, size_t argc, char *argv[])
 		host_rx = true;
 	}
 
-	ret = eth_bridge_fdb_add(&mac, iface, (uint32_t)portmap, host_rx);
+	ret = eth_bridge_fdb_add(iface, &(const struct eth_bridge_fdb_params){
+						.mac = &mac,
+						.portmap = (uint32_t)portmap,
+						.host_rx = host_rx,
+					});
 	if (ret != 0) {
 		return ret;
 	}
@@ -335,7 +339,7 @@ static int cmd_bridge_fdb_del(const struct shell *sh, size_t argc, char *argv[])
 		return -EINVAL;
 	}
 
-	ret = eth_bridge_fdb_del(&mac, iface);
+	ret = eth_bridge_fdb_del(iface, &(const struct eth_bridge_fdb_params){ .mac = &mac });
 	if (ret != 0) {
 		return ret;
 	}
@@ -352,6 +356,7 @@ static int cmd_bridge_fdb_del(const struct shell *sh, size_t argc, char *argv[])
 static void cmd_bridge_fdb_handler(struct eth_bridge_fdb_entry *entry, void *user_data)
 {
 	const struct shell *sh = (const struct shell *)user_data;
+	struct net_if *port;
 
 	if ((entry->flags & ETHERNET_BRIDGE_FDB_FLAG_HW) != 0U) {
 		shell_print(sh, "%02x:%02x:%02x:%02x:%02x:%02x  ports 0x%x%s  hw",
@@ -361,11 +366,14 @@ static void cmd_bridge_fdb_handler(struct eth_bridge_fdb_entry *entry, void *use
 		return;
 	}
 
+	/* The port of an entry without a port map is its only bit */
+	port = eth_bridge_get_port_iface(entry->bridge, find_lsb_set(entry->portmap) - 1);
+
 	shell_print(sh, "%02x:%02x:%02x:%02x:%02x:%02x  %-8d  %s",
 		 entry->mac.addr[0], entry->mac.addr[1],
 		 entry->mac.addr[2], entry->mac.addr[3],
 		 entry->mac.addr[4], entry->mac.addr[5],
-		 net_if_get_by_iface(entry->iface),
+		 port != NULL ? net_if_get_by_iface(port) : 0,
 		 (entry->flags & ETHERNET_BRIDGE_FDB_FLAG_STATIC) ? "static" : "dynamic");
 }
 #endif

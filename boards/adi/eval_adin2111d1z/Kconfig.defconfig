@@ -9,10 +9,12 @@ configdefault ETH_DRIVER
 	default y
 
 if ETH_ADIN2111
-
+# Enable bridge
 configdefault NET_ETHERNET_BRIDGE
 	default y
-
+# HW bridge only is required
+configdefault NET_ETHERNET_BRIDGE_COUNT
+	default 0
 endif # ETH_ADIN2111
 
 endif # BOARD_ADI_EVAL_ADIN2111D1Z

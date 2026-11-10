@@ -63,7 +63,7 @@ static inline bool eth_bridge_port_is_forwarding(struct net_if *iface)
  *
  * @param iface Ethernet interface
  *
- * @return true if the bridge of @p iface was set with eth_bridge_set_hw_forwarding().
+ * @return true if the bridge of @p iface was defined with ETH_BRIDGE_HW_DEFINE().
  */
 bool eth_bridge_port_hw_forwarding(struct net_if *iface);
 

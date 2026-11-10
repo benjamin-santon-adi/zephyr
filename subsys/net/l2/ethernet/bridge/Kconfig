@@ -13,13 +13,33 @@ menuconfig NET_ETHERNET_BRIDGE
 
 if NET_ETHERNET_BRIDGE
 
-config NET_ETHERNET_BRIDGE_COUNT
-	int "Max number of bridge interfaces"
+config NET_ETHERNET_BRIDGE_HW
+	bool "Bridges of devices that forward in hardware"
+	help
+	  Allow drivers to define the bridge of the ports of a device that forwards
+	  between them in hardware, with ETH_BRIDGE_HW_DEFINE(). Such a bridge has an
+	  interface of its own, so NET_ETHERNET_BRIDGE_COUNT can be 0. Selected by the
+	  drivers that have one.
+
+config NET_ETHERNET_BRIDGE_HW_COUNT
+	int "Max number of bridge interfaces of devices that forward in hardware"
+	depends on NET_ETHERNET_BRIDGE_HW
 	default 1
 	range 1 16
 	help
+	  How many bridge interfaces are created for them, one for each device whose
+	  driver defines a bridge of its ports. They are not taken by
+	  eth_bridge_get_free().
+
+config NET_ETHERNET_BRIDGE_COUNT
+	int "Max number of bridge interfaces"
+	default 1
+	range 0 16 if NET_ETHERNET_BRIDGE_HW
+	range 1 16
+	help
 	  How many bridge interfaces are created. Each interface can bridge
-	  two or more Ethernet interfaces.
+	  two or more Ethernet interfaces. Can be 0 if only the bridges of devices
+	  that forward in hardware are used.
 
 config NET_ETHERNET_BRIDGE_ETH_INTERFACE_COUNT
 	int "Max number of Ethernet interfaces bridged together"

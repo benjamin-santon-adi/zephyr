@@ -34,7 +34,7 @@ extern "C" {
 #define ETHERNET_BRIDGE_FDB_FLAG_STATIC  BIT(0) /**< Static entry (manually added) */
 #define ETHERNET_BRIDGE_FDB_FLAG_DYNAMIC BIT(1) /**< Dynamic entry (learned) */
 /** Entry with a port map, held by a device that forwards in hardware.
- *  Always static, and @ref eth_bridge_fdb_entry.iface is NULL.
+ *  Always static.
  */
 #define ETHERNET_BRIDGE_FDB_FLAG_HW      BIT(2)
 
@@ -44,12 +44,11 @@ extern "C" {
 struct eth_bridge_fdb_entry {
 	/** MAC address */
 	struct net_eth_addr mac;
-	/** Interface, NULL for an entry with @ref ETHERNET_BRIDGE_FDB_FLAG_HW */
-	struct net_if *iface;
 	/** Bridge interface the entry belongs to */
 	struct net_if *bridge;
-	/** Bridge ports the frames for @ref mac go to, bit n for the bridge port n.
-	 *  Only for an entry with @ref ETHERNET_BRIDGE_FDB_FLAG_HW.
+	/** Bridge ports the frames for @ref mac go to, bit n for the bridge port n,
+	 *  whose interface eth_bridge_get_port_iface() returns. An entry without
+	 *  @ref ETHERNET_BRIDGE_FDB_FLAG_HW has exactly one bit set, the port of the station.
 	 */
 	uint32_t portmap;
 	/** The frames for @ref mac are also passed to the host. Only for an
@@ -67,44 +66,56 @@ struct eth_bridge_fdb_entry {
 };
 
 /**
+ * @brief Parameters of a static FDB entry, see eth_bridge_fdb_add() and eth_bridge_fdb_del()
+ */
+struct eth_bridge_fdb_params {
+	/** MAC address */
+	struct net_eth_addr *mac;
+	/** Bridge ports the frames for @ref mac go to, bit n for the
+	 *  bridge port n, which eth_bridge_get_port_iface() gives for n.
+	 *  0 for the interface given to eth_bridge_fdb_add() alone. Without a bridge defined
+	 *  with ETH_BRIDGE_HW_DEFINE() it must be 0 or that interface alone.
+	 */
+	uint32_t portmap;
+	/** The frames are also passed to the host. Needs
+	 *  a bridge defined with ETH_BRIDGE_HW_DEFINE().
+	 */
+	bool host_rx;
+};
+
+/**
  * @brief Add a static FDB entry
  *
- * On a port whose device reports a bridge set with eth_bridge_set_hw_forwarding() the entry is
- * also given to the hooks of the bridge, for the device to forward the frames for @p mac to the
- * ports of @p portmap and to the host if @p host_rx is set. All the ports of the
+ * On a port whose device reports a bridge defined with ETH_BRIDGE_HW_DEFINE() the entry is
+ * also given to the hooks of the bridge, for the device to forward the frames for
+ * @ref eth_bridge_fdb_params.mac to the ports of @ref eth_bridge_fdb_params.portmap and
+ * to the host if @ref eth_bridge_fdb_params.host_rx is set. All the ports of the
  * bridge must then be of such devices. The entry replaces the one the bridge
- * has for @p mac. The bridge does not learn into or forward the frames of those
- * ports itself, and a frame the host sends to @p mac only goes out of the
- * ports of @p portmap.
+ * has for the MAC address. The bridge does not learn into or forward the frames of those
+ * ports itself, and a frame the host sends to the MAC address only goes out of the
+ * ports of the port map.
  *
- * @param mac MAC address
  * @param iface Interface, a port of the bridge
- * @param portmap Bridge ports the frames for @p mac go to, bit n for the
- *                bridge port n, which eth_bridge_get_port_iface() gives for n.
- *                0 for @p iface alone. Without a bridge set with eth_bridge_set_hw_forwarding()
- *                it must be 0 or @p iface alone.
- * @param host_rx The frames are also passed to the host. Needs
- *                a bridge set with eth_bridge_set_hw_forwarding().
+ * @param params Parameters of the entry
  * @retval 0 on success
- * @retval -EINVAL A bad argument, or @p portmap has a bit of no port
- * @retval -ENOTSUP @p portmap or @p host_rx without a bridge set with eth_bridge_set_hw_forwarding()
- *         on every port of the bridge
+ * @retval -EINVAL A bad argument, or the port map has a bit of no port
+ * @retval -ENOTSUP A port map or host receive flag without a bridge defined with
+ *         ETH_BRIDGE_HW_DEFINE() on every port of the bridge
  * @retval -ENOMEM The table is full
  * @return Another negative errno the device gave, the entry is then unchanged
  */
-int eth_bridge_fdb_add(struct net_eth_addr *mac, struct net_if *iface, uint32_t portmap,
-		       bool host_rx);
+int eth_bridge_fdb_add(struct net_if *iface, const struct eth_bridge_fdb_params *params);
 
 /**
  * @brief Delete an FDB entry
  *
- * @param mac MAC address
  * @param iface Interface (NULL to delete from any interface). With
- *              a bridge set with eth_bridge_set_hw_forwarding() the entry of the bridge of @p iface is
+ *              a bridge defined with ETH_BRIDGE_HW_DEFINE() the entry of the bridge of @p iface is
  *              deleted, whatever its ports.
+ * @param params Parameters of the entry, only @ref eth_bridge_fdb_params.mac is used
  * @return 0 on success, negative errno on failure
  */
-int eth_bridge_fdb_del(struct net_eth_addr *mac, struct net_if *iface);
+int eth_bridge_fdb_del(struct net_if *iface, const struct eth_bridge_fdb_params *params);
 
 /**
  * @brief Delete FDB entries on an interface

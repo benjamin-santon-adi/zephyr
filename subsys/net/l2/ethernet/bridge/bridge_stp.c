@@ -62,7 +62,8 @@ struct stp_bridge {
 	bool reported_topology_change;
 };
 
-static struct stp_bridge stp_bridges[CONFIG_NET_ETHERNET_BRIDGE_COUNT];
+static struct stp_bridge stp_bridges[CONFIG_NET_ETHERNET_BRIDGE_COUNT +
+				     NET_ETHERNET_BRIDGE_HW_INTERFACE_COUNT];
 
 static struct eth_bridge_iface_context *bridge_ctx(struct net_if *br)
 {
@@ -439,7 +440,7 @@ static void tick_handler(struct k_work *work)
 
 static struct stp_bridge *stp_of(struct eth_bridge_iface_context *ctx)
 {
-	__ASSERT_NO_MSG(ctx->id >= 0 && ctx->id < CONFIG_NET_ETHERNET_BRIDGE_COUNT);
+	__ASSERT_NO_MSG(ctx->id >= 0 && ctx->id < ARRAY_SIZE(stp_bridges));
 
 	return &stp_bridges[ctx->id];
 }

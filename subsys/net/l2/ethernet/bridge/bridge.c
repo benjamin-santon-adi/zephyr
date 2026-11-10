@@ -107,6 +107,11 @@ struct net_if *eth_bridge_get_port_iface(struct net_if *br, size_t port)
 	return ctx->ports[port].iface;
 }
 
+static const struct eth_bridge_hw_dev_config *bridge_hw(struct eth_bridge_iface_context *ctx)
+{
+	return net_if_get_device(ctx->iface)->config;
+}
+
 struct free_bridge {
 	struct net_if *iface;
 };
@@ -115,7 +120,7 @@ static void free_bridge_cb(struct eth_bridge_iface_context *ctx, void *user_data
 {
 	struct free_bridge *free_br = user_data;
 
-	if (free_br->iface == NULL && ctx->hw_ops == NULL && ctx->count == 0U) {
+	if (free_br->iface == NULL && bridge_hw(ctx) == NULL && ctx->count == 0U) {
 		free_br->iface = ctx->iface;
 	}
 }
@@ -129,35 +134,57 @@ struct net_if *eth_bridge_get_free(void)
 	return free_br.iface;
 }
 
-int eth_bridge_set_hw_forwarding(struct net_if *br, const struct eth_bridge_hw_ops *ops,
-				 void *user_data)
-{
-	const struct device *br_dev = net_if_get_device(br);
-	struct eth_bridge_iface_context *ctx;
-
-	NET_ASSERT(br_dev != NULL);
-
-	if (ops == NULL || net_if_l2(br) != &NET_L2_GET_NAME(VIRTUAL) ||
-	    !(net_virtual_get_iface_capabilities(br) & VIRTUAL_INTERFACE_BRIDGE)) {
-		return -EINVAL;
-	}
-
-	ctx = br_dev->data;
-
-	lock_bridge(ctx);
-	ctx->hw_ops = ops;
-	ctx->hw_user_data = user_data;
-	unlock_bridge(ctx);
-
-	return 0;
-}
-
 static bool bridge_hw_forwarding(struct net_if *br)
 {
 	const struct device *dev = net_if_get_device(br);
 	struct eth_bridge_iface_context *ctx = dev->data;
 
-	return ctx->hw_ops != NULL;
+	return bridge_hw(ctx) != NULL && ctx->hw_forwarding;
+}
+
+int eth_bridge_hw_forwarding_enable(struct net_if *br, bool enable)
+{
+	const struct device *dev = net_if_get_device(br);
+	struct eth_bridge_iface_context *ctx;
+	int ret;
+
+	NET_ASSERT(dev != NULL);
+
+	ctx = dev->data;
+
+	if (bridge_hw(ctx) == NULL) {
+		return -ENOTSUP;
+	}
+
+	lock_bridge(ctx);
+
+	if (ctx->hw_forwarding == enable) {
+		unlock_bridge(ctx);
+		return 0;
+	}
+
+	/* The protocol blocks ports in software, which the device bypasses */
+	if (enable && IS_ENABLED(CONFIG_NET_ETHERNET_BRIDGE_STP) && eth_bridge_stp_is_running(ctx)) {
+		unlock_bridge(ctx);
+		return -EBUSY;
+	}
+
+	/* The entries of one mode do not hold in the other, and the ones of the device are
+	 * removed from it while it still forwards.
+	 */
+	eth_bridge_fdb_flush(br, NULL, false);
+
+	ret = bridge_hw(ctx)->api->set_config(bridge_hw(ctx)->dev,
+					      ETH_BRIDGE_HW_CONFIG_TYPE_FORWARDING,
+				      &(const struct eth_bridge_hw_config){
+					.br = br, .forwarding = enable });
+	if (ret == 0) {
+		ctx->hw_forwarding = enable;
+	}
+
+	unlock_bridge(ctx);
+
+	return ret;
 }
 
 bool eth_bridge_port_hw_forwarding(struct net_if *iface)
@@ -190,7 +217,7 @@ int eth_bridge_hw_fdb_check(struct net_if *br, uint32_t portmap)
 
 	ctx = dev->data;
 
-	if (ctx->hw_ops == NULL) {
+	if (bridge_hw(ctx) == NULL) {
 		return -ENOTSUP;
 	}
 
@@ -214,27 +241,22 @@ int eth_bridge_hw_fdb_config(struct net_if *br, bool set,
 {
 	const struct device *dev = net_if_get_device(br);
 	struct eth_bridge_iface_context *ctx;
-	int (*hook)(struct net_if *br, const struct eth_bridge_hw_fdb_entry *entry,
-		    void *user_data);
+	struct eth_bridge_hw_config config = { .br = br, .fdb = *entry };
 	int ret;
 
 	NET_ASSERT(dev != NULL);
 
 	ctx = dev->data;
 
-	if (ctx->hw_ops == NULL) {
-		return -ENOTSUP;
-	}
-
-	hook = set ? ctx->hw_ops->fdb_set : ctx->hw_ops->fdb_del;
-	if (hook == NULL) {
+	if (bridge_hw(ctx) == NULL) {
 		return -ENOTSUP;
 	}
 
 	/* The bridge lock is not taken, as callers hold the FDB lock which the
 	 * bridge lock holders also take.
 	 */
-	ret = hook(br, entry, ctx->hw_user_data);
+	ret = bridge_hw(ctx)->api->set_config(bridge_hw(ctx)->dev, set ? ETH_BRIDGE_HW_CONFIG_TYPE_FDB_SET :
+				      ETH_BRIDGE_HW_CONFIG_TYPE_FDB_DEL, &config);
 	if (ret < 0) {
 		NET_ERR("bridge %d: hardware FDB entry failed (%d)", net_if_get_by_iface(br), ret);
 	}
@@ -293,7 +315,7 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 	}
 
 	/* The ports of a bridge that forwards in hardware are those of its device */
-	if (ctx->hw_ops != NULL && !found) {
+	if (ctx->hw_locked && !found) {
 		unlock_bridge(ctx);
 		return -EBUSY;
 	}
@@ -615,6 +637,15 @@ static void bridge_iface_init(struct net_if *iface)
 	ctx = dev->data;
 
 	k_mutex_init(&ctx->lock);
+
+	if (ctx->id < 0) {
+		/* The bridge of a device that forwards in hardware */
+		static int hw_bridges;
+
+		ctx->id = CONFIG_NET_ETHERNET_BRIDGE_COUNT + hw_bridges++;
+		__ASSERT(hw_bridges <= NET_ETHERNET_BRIDGE_HW_INTERFACE_COUNT,
+			 "See CONFIG_NET_ETHERNET_BRIDGE_HW_COUNT");
+	}
 
 	net_if_flag_set(iface, NET_IF_NO_AUTO_START);
 	net_if_flag_set(iface, NET_IF_IPV4);
@@ -957,7 +988,7 @@ static int bridge_iface_attach(struct net_if *br,
 	return -ENOTSUP;
 }
 
-static const struct virtual_interface_api bridge_iface_api = {
+const struct virtual_interface_api eth_bridge_virtual_api = {
 	.iface_api.init = bridge_iface_init,
 
 	.get_capabilities = bridge_get_capabilities,
@@ -979,7 +1010,7 @@ static const struct virtual_interface_api bridge_iface_api = {
 					    &bridge_context_data_##x,	\
 					    NULL, /* config */		\
 					    CONFIG_KERNEL_INIT_PRIORITY_DEFAULT, \
-					    &bridge_iface_api,		\
+					    &eth_bridge_virtual_api,		\
 					    NET_ETH_MTU)		\
 									\
 	static struct eth_bridge_iface_context bridge_context_data_##x = { \
@@ -987,4 +1018,98 @@ static const struct virtual_interface_api bridge_iface_api = {
 		.id = x,						\
 	};
 
+#if CONFIG_NET_ETHERNET_BRIDGE_COUNT > 0
 LISTIFY(CONFIG_NET_ETHERNET_BRIDGE_COUNT, ETH_DEFINE_BRIDGE, (;), _);
+#endif
+
+static void eth_bridge_hw_carrier_update(struct net_if *br, struct eth_bridge_iface_context *ctx)
+{
+	if (ctx->hw_link != 0U) {
+		net_if_carrier_on(br);
+	} else {
+		net_if_carrier_off(br);
+	}
+}
+
+void eth_bridge_hw_link_set(struct net_if *br, size_t port, bool up)
+{
+	struct eth_bridge_iface_context *ctx = net_if_get_device(br)->data;
+
+	if (bridge_hw(ctx) == NULL ||
+	    port >= bridge_hw(ctx)->api->get_number_iface(bridge_hw(ctx)->dev)) {
+		return;
+	}
+
+	NET_DBG("bridge %d: port %zu link %s", net_if_get_by_iface(br), port,
+		up ? "up" : "down");
+
+	WRITE_BIT(ctx->hw_link, port, up);
+	eth_bridge_hw_carrier_update(br, ctx);
+}
+
+int eth_bridge_hw_init(struct net_if *br)
+{
+	struct eth_bridge_iface_context *ctx = net_if_get_device(br)->data;
+	const struct eth_bridge_hw_dev_config *hw = bridge_hw(ctx);
+	const struct eth_bridge_hw_api *api;
+	size_t nports;
+	int ret;
+
+	if (hw == NULL || hw->api == NULL) {
+		return -EINVAL;
+	}
+
+	api = hw->api;
+
+	if (api->set_config == NULL || api->get_number_iface == NULL ||
+	    api->get_port_iface == NULL) {
+		return -EINVAL;
+	}
+
+	nports = api->get_number_iface(hw->dev);
+	if (nports > 32U) {
+		return -EINVAL;
+	}
+
+	for (size_t port = 0; port < nports; port++) {
+		struct net_if *iface = api->get_port_iface(hw->dev, port);
+
+		if (iface == NULL) {
+			return -ENODEV;
+		}
+
+		ret = eth_bridge_iface_add(br, iface);
+		if (ret < 0) {
+			NET_ERR("bridge %d: port %zu not added, %d", net_if_get_by_iface(br), port,
+				ret);
+			return ret;
+		}
+	}
+
+	ret = api->set_config(hw->dev, ETH_BRIDGE_HW_CONFIG_TYPE_FORWARDING,
+			      &(const struct eth_bridge_hw_config){ .br = br, .forwarding = true });
+	if (ret < 0) {
+		NET_ERR("bridge %d: forwarding not set, %d", net_if_get_by_iface(br), ret);
+		return ret;
+	}
+
+	lock_bridge(ctx);
+	ctx->hw_forwarding = true;
+	ctx->hw_locked = true;
+	unlock_bridge(ctx);
+
+	/* Taken up here, but the carrier follows the links of the ports. It is
+	 * not auto started, so that nothing else brings it up without carrier.
+	 */
+	//net_if_carrier_off(br);
+
+	ret = net_if_up(br);
+	if (ret < 0 && ret != -EALREADY) {
+		NET_ERR("bridge %d: not up, %d", net_if_get_by_iface(br), ret);
+		return ret;
+	}
+
+	eth_bridge_hw_carrier_update(br, ctx);
+
+	return 0;
+}

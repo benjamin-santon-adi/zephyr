@@ -48,18 +48,30 @@ show`` lists it.
 Hardware forwarding
 ===================
 
-A bridge set with :c:func:`eth_bridge_set_hw_forwarding` has the ports of one device that forwards
+A bridge defined with :c:macro:`ETH_BRIDGE_HW_DEFINE` has the ports of one device that forwards
 frames between them, such as the ADIN2111, whose driver bridges its two ports with a bridge taken
-by :c:func:`eth_bridge_get_free`. The bridge neither learns, forwards nor floods: it passes to the
+with :c:macro:`ETH_BRIDGE_HW_DEFINE`. The bridge neither learns, forwards nor floods: it passes to the
 host only the frames the device delivers, and the FDB is programmed into the device.
 
 :c:func:`eth_bridge_fdb_add` and ``net bridge fdb add <mac> <iface> [<portmap> [host]]`` take a
 port map and a host receive flag for it. Bit n of the port map is the bridge port n, whose interface
 :c:func:`eth_bridge_get_port_iface` returns, and a port map of 0 is the interface alone. The
-bridge calls the :c:struct:`eth_bridge_hw_ops` hooks given to
-:c:func:`eth_bridge_set_hw_forwarding` with a :c:struct:`eth_bridge_hw_fdb_entry`, and :c:func:`eth_bridge_fdb_del` deletes the entry. A frame the host sends goes out
+bridge calls the ``set_config`` of the :c:struct:`eth_bridge_hw_api` of the bridge
+with a :c:struct:`eth_bridge_hw_fdb_entry`, and
+:c:func:`eth_bridge_fdb_del` deletes the entry. A driver that has such a device defines its bridge
+with :c:macro:`ETH_BRIDGE_HW_DEFINE`, which defines a bridge interface of its own, reports the
+link of its ports with :c:func:`eth_bridge_hw_link_set`, and provides the
+:c:struct:`eth_bridge_hw_api`. The bridge has carrier when a port link is up, and
+:kconfig:option:`CONFIG_NET_ETHERNET_BRIDGE_HW` enables them, and
+:kconfig:option:`CONFIG_NET_ETHERNET_BRIDGE_HW_COUNT` bounds how many there are. With them,
+:kconfig:option:`CONFIG_NET_ETHERNET_BRIDGE_COUNT` can be 0. A frame the host sends goes out
 of the ports of its entry, or of all ports when the address has none. All the ports of the bridge
 are of that device.
+
+:c:func:`eth_bridge_hw_forwarding_enable` with ``false`` stops the device from forwarding: it passes
+every frame of its ports to the host, and the bridge then learns, floods and runs the spanning tree
+protocol in software, as a bridge of any ports. The FDB entries are removed when the mode changes,
+and the forwarding cannot be enabled while the protocol runs.
 
 Spanning tree
 *************
@@ -177,7 +189,7 @@ Limitations
 
 * The protocol blocks a port in software. A device that forwards frames between its ports in
   hardware, a DSA switch user port or a port of a bridge set with
-  :c:func:`eth_bridge_set_hw_forwarding` such as the ADIN2111 ports, cannot be blocked that way. The protocol runs on such a port only when its device also reports the
+  :c:macro:`ETH_BRIDGE_HW_DEFINE` such as the ADIN2111 ports, cannot be blocked that way. The protocol runs on such a port only when its device also reports the
   :c:enumerator:`ETHERNET_HW_STP_PORT_STATE` capability: the protocol then passes every port
   state change (:c:enum:`ethernet_stp_port_state`) and FDB flush to the device, which traps
   the BPDUs to the host. Otherwise the protocol does not start on a bridge with such a port.

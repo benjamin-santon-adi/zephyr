@@ -240,8 +240,12 @@ struct adin2111_data {
 	uint8_t *oa_rx_buf;
 	uint16_t ifaces_left_to_init;
 	uint16_t scur;
+#if defined(CONFIG_ETH_ADIN2111_BRIDGE)
 	/* Address filter slots that hold FDB entries of the bridge */
 	uint16_t fdb_slots;
+	/* Bridge of the ports, NULL if not bridged */
+	struct net_if *bridge;
+#endif /* CONFIG_ETH_ADIN2111_BRIDGE */
 	/* The device forwards frames between its ports */
 	bool forwarding;
 	struct gpio_callback gpio_int_callback;
