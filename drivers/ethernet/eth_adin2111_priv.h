@@ -226,8 +226,6 @@ struct adin2111_config {
 	struct spi_dt_spec spi;
 	struct gpio_dt_spec interrupt;
 	struct gpio_dt_spec reset;
-	/* The devicetree node has a switch interface, see the switch child node */
-	bool has_switch;
 };
 
 struct adin2111_data {
@@ -238,9 +236,6 @@ struct adin2111_data {
 	uint8_t *buf;
 	/* Port 0: PHY 1, Port 1: PHY 2 */
 	const struct device *port[2];
-#if defined(CONFIG_ETH_ADIN2111_SWITCH_IFACE)
-	const struct device *sw;
-#endif
 	uint8_t *oa_tx_buf;
 	uint8_t *oa_rx_buf;
 	uint16_t ifaces_left_to_init;
@@ -267,34 +262,6 @@ struct adin2111_port_config {
 	const uint16_t port_idx;
 	const uint16_t phy_addr;
 };
-
-#if defined(CONFIG_ETH_ADIN2111_SWITCH_IFACE)
-/* Port of a station the host has received a frame from */
-struct adin2111_switch_fdb_entry {
-	uint8_t mac[6];
-	uint8_t port_idx;
-	bool used;
-	/* Set by the user: never learned over, never aged, never evicted */
-	bool is_static;
-	int64_t last_seen;
-};
-
-struct adin2111_switch_data {
-	struct net_if *iface;
-	uint8_t mac_addr[6];
-	struct k_spinlock fdb_lock;
-	/* Seconds without a frame before a learned station is forgotten, 0 never */
-	uint32_t ageing_time;
-	struct adin2111_switch_fdb_entry fdb[CONFIG_ETH_ADIN2111_SWITCH_FDB_SIZE];
-#if defined(CONFIG_NET_STATISTICS_ETHERNET)
-	struct net_stats_eth stats;
-#endif /* CONFIG_NET_STATISTICS_ETHERNET */
-};
-
-struct adin2111_switch_config {
-	const struct device *adin;
-};
-#endif /* CONFIG_ETH_ADIN2111_SWITCH_IFACE */
 
 int eth_adin2111_reg_write(const struct device *dev, const uint16_t reg, uint32_t val);
 

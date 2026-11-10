@@ -143,13 +143,6 @@
 		spi-oa-protection;
 		status = "okay";
 
-
-		switch {
-			// Logical interface to handle IP frames only
-			local-mac-address = [00 aa 22 fe da d0];
-			status = "okay";
-		};
-		
 		port1 {
 			local-mac-address = [00 aa 22 fe da c8];
 			status = "okay";

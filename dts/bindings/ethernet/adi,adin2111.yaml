@@ -28,9 +28,7 @@ properties:
     description: Enables Open Alliance SPI protocol protection.
 
 child-binding:
-  description: |
-    Port properties. The optional "switch" child holds the MAC address of the
-    switch interface, used when CONFIG_ETH_ADIN2111_SWITCH_IFACE is enabled.
+  description: Port properties
   properties:
     local-mac-address:
       type: uint8-array
