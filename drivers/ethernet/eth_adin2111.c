@@ -1498,15 +1498,10 @@ static int adin2111_init(const struct device *dev)
 	 * forward them to the other port. The filter table takes entries now the cut through is on.
 	 */
 	if (IS_ENABLED(CONFIG_NET_LLDP)) {
-		const struct ethernet_switch_port_map to_host = {
-			.port_ref = ETHERNET_SWITCH_PORT_HOST,
-			.control_element = ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD,
-		};
 		const struct ethernet_switch_filtering_entry lldp = {
 			.address = { .addr = { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } },
 			.vids = ETHERNET_SWITCH_VID_ANY,
-			.port_map = &to_host,
-			.port_map_len = 1U,
+			.port_map = { .receive = true },
 		};
 
 		ret = adin2111_filtering_entry_set(dev, &lldp, true);
@@ -1568,38 +1563,21 @@ static uint32_t adin2111_switch_ports_mask(const struct device *dev)
  */
 static int adin2111_port_map_rules(const struct device *dev, uint8_t input_port,
 				   const struct ethernet_switch_port_map *port_map,
-				   size_t port_map_len, uint32_t *rules)
+				   uint32_t *rules)
 {
-	const uint32_t ports = adin2111_switch_ports_mask(dev);
 	uint32_t val = 0U;
 
-	if (port_map == NULL && port_map_len != 0U) {
+	if (port_map == NULL || (port_map->forward & ~adin2111_switch_ports_mask(dev)) != 0U) {
 		return -EINVAL;
 	}
 
-	for (size_t i = 0; i < port_map_len; i++) {
-		const uint8_t port_ref = port_map[i].port_ref;
+	if (port_map->receive) {
+		val |= ADIN2111_ADDR_TO_HOST;
+	}
 
-		if (port_ref != ETHERNET_SWITCH_PORT_HOST &&
-		    (port_ref >= 32U || (BIT(port_ref) & ports) == 0U)) {
-			return -EINVAL;
-		}
-
-		if (port_map[i].control_element ==
-		    ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD_FILTER) {
-			return -ENOTSUP;
-		}
-
-		if (port_map[i].control_element != ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD) {
-			continue;
-		}
-
-		if (port_ref == ETHERNET_SWITCH_PORT_HOST) {
-			val |= ADIN2111_ADDR_TO_HOST;
-		} else if (port_ref != input_port) {
-			/* The chip never sends a frame back to the port it came from */
-			val |= ADIN2111_ADDR_TO_OTHER_PORT;
-		}
+	/* The chip never sends a frame back to the port it came from */
+	if ((port_map->forward & ~BIT(input_port)) != 0U) {
+		val |= ADIN2111_ADDR_TO_OTHER_PORT;
 	}
 
 	*rules = val;
@@ -1692,15 +1670,14 @@ static int adin2111_filtering_entry_set(const struct device *dev,
 	size_t groups = 0U;
 	int ret;
 
-	if (entry == NULL || entry->database_id != 0U) {
+	if (entry == NULL) {
 		return -EINVAL;
 	}
 
-	/* One filtering database, matched on the address only: no VLAN, no extended lookup and no
-	 * stream identification in this chip.
+	/* Matched on the address only: no VLAN and no extended lookup in
+	 * this chip.
 	 */
-	if (entry->vids != ETHERNET_SWITCH_VID_ANY || entry->ext_lookup != NULL ||
-	    entry->stream_identification != NULL) {
+	if (entry->vids != ETHERNET_SWITCH_VID_ANY || entry->extended_lookup) {
 		return -ENOTSUP;
 	}
 
@@ -1710,8 +1687,8 @@ static int adin2111_filtering_entry_set(const struct device *dev,
 				continue;
 			}
 
-			ret = adin2111_port_map_rules(dev, port, entry->port_map,
-						      entry->port_map_len, &port_rules[port]);
+			ret = adin2111_port_map_rules(dev, port, &entry->port_map,
+						      &port_rules[port]);
 			if (ret < 0) {
 				return ret;
 			}
@@ -1781,10 +1758,8 @@ static int adin2111_filtering_entry_foreach(const struct device *dev,
 
 	/* The callback is called without the device locked, so it can call the other operations */
 	for (int i = ADIN2111_FILTER_FIRST_SLOT; i < ADIN2111_FILTER_SLOTS; i++) {
-		struct ethernet_switch_port_map port_map[3];
 		struct ethernet_switch_filtering_entry entry = {
 			.vids = ETHERNET_SWITCH_VID_ANY,
-			.port_map = port_map,
 		};
 		uint32_t upr = 0U;
 		uint32_t lwr = 0U;
@@ -1810,28 +1785,13 @@ static int adin2111_filtering_entry_foreach(const struct device *dev,
 		sys_put_be16((uint16_t)(upr & UINT16_MAX), &entry.address.addr[0]);
 		sys_put_be32(lwr, &entry.address.addr[2]);
 
-		if ((upr & ADIN2111_ADDR_TO_HOST) != 0U) {
-			port_map[entry.port_map_len].port_ref = ETHERNET_SWITCH_PORT_HOST;
-			port_map[entry.port_map_len++].control_element =
-				ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD;
-		}
+		entry.port_map.receive = (upr & ADIN2111_ADDR_TO_HOST) != 0U;
 
 		if ((upr & ADIN2111_ADDR_TO_OTHER_PORT) != 0U) {
 			/* The frames from a port go to the other one */
-			const bool from_port1 = (upr & ADIN2111_ADDR_APPLY2PORT1) != 0U;
-			const bool from_port2 = (upr & ADIN2111_ADDR_APPLY2PORT2) != 0U;
-
-			if (from_port2) {
-				port_map[entry.port_map_len].port_ref = 0U;
-				port_map[entry.port_map_len++].control_element =
-					ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD;
-			}
-
-			if (from_port1) {
-				port_map[entry.port_map_len].port_ref = 1U;
-				port_map[entry.port_map_len++].control_element =
-					ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD;
-			}
+			entry.port_map.forward =
+				(((upr & ADIN2111_ADDR_APPLY2PORT2) != 0U) ? BIT(0) : 0U) |
+				(((upr & ADIN2111_ADDR_APPLY2PORT1) != 0U) ? BIT(1) : 0U);
 		}
 
 		cb(&entry, user_data);
@@ -1842,8 +1802,7 @@ static int adin2111_filtering_entry_foreach(const struct device *dev,
 
 /* The default rule of the frames from an unknown destination, a pair of bits per port */
 static int adin2111_default_port_map_set(const struct device *dev, uint32_t input_port_list,
-					 const struct ethernet_switch_port_map *port_map,
-					 size_t port_map_len)
+					 const struct ethernet_switch_port_map *port_map)
 {
 	const uint32_t ports = adin2111_switch_ports_mask(dev);
 	uint32_t mask = 0U;
@@ -1857,7 +1816,7 @@ static int adin2111_default_port_map_set(const struct device *dev, uint32_t inpu
 	if ((input_port_list & BIT(0)) != 0U) {
 		uint32_t rules;
 
-		ret = adin2111_port_map_rules(dev, 0U, port_map, port_map_len, &rules);
+		ret = adin2111_port_map_rules(dev, 0U, port_map, &rules);
 		if (ret < 0) {
 			return ret;
 		}
@@ -1872,7 +1831,7 @@ static int adin2111_default_port_map_set(const struct device *dev, uint32_t inpu
 	if ((input_port_list & BIT(1)) != 0U) {
 		uint32_t rules;
 
-		ret = adin2111_port_map_rules(dev, 1U, port_map, port_map_len, &rules);
+		ret = adin2111_port_map_rules(dev, 1U, port_map, &rules);
 		if (ret < 0) {
 			return ret;
 		}
