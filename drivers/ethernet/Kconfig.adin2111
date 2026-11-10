@@ -55,4 +55,40 @@ config ETH_ADIN2111_BUFFER_SIZE
 	help
 	  Transmission and reception buffer size.
 
+config ETH_ADIN2111_SWITCH_IFACE
+	bool "Switch interface for the IP traffic of the ADIN2111"
+	default y
+	depends on DT_HAS_ADI_ADIN2111_ENABLED
+	help
+	  Support a third network interface on an ADIN2111, next to the two port
+	  interfaces. The interface is created for each ADIN2111 devicetree node
+	  that has a "switch" child with status "okay" and a local-mac-address.
+
+	  The switch interface owns the MAC and IP addresses of the device, and
+	  carries the IP traffic of both ports: a frame it sends leaves by the
+	  port of its destination, and the frames received from both ports for
+	  the host arrive on it.
+
+	  The port interfaces keep the frames of the link-local protocols such as
+	  LLDP, gPTP and STP, and cannot carry IP. The ADIN2111 forwards the
+	  frames between its two ports in hardware, the host takes no part in it.
+
+	  Disable it to leave the code out when no node uses it.
+
+config ETH_ADIN2111_SWITCH_FDB_SIZE
+	int "Number of stations the switch interface remembers"
+	default 8
+	range 1 64
+	depends on ETH_ADIN2111_SWITCH_IFACE
+	help
+	  The ADIN2111 cannot choose the egress port of a frame the host sends.
+	  The switch interface learns the port of a station from the frames it
+	  receives from it, and sends to a station it does not know on both ports.
+
+config ETH_ADIN2111_SWITCH_FDB_AGEING_TIME
+	int "Seconds before the switch interface forgets a station"
+	default 300
+	range 1 86400
+	depends on ETH_ADIN2111_SWITCH_IFACE
+
 endif # ETH_ADIN2111

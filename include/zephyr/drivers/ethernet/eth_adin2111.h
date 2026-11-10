@@ -96,6 +96,19 @@ int eth_adin2111_broadcast_filter(const struct device *dev, bool enable);
  */
 struct net_if *eth_adin2111_get_iface(const struct device *dev, const uint16_t port_idx);
 
+/**
+ * @brief Get the switch net_if reference.
+ *
+ * The switch interface carries the IP traffic of both ports, see
+ * @kconfig{CONFIG_ETH_ADIN2111_SWITCH_IFACE}.
+ *
+ * @param[in] dev ADIN2111 device.
+ *
+ * @retval a struct net_if pointer, or NULL if the device has no switch interface
+ *         or it is not initialized yet.
+ */
+struct net_if *eth_adin2111_get_switch_iface(const struct device *dev);
+
 #ifdef __cplusplus
 }
 #endif
