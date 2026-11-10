@@ -1368,8 +1368,9 @@ int eth_adin2111_sw_reset(const struct device *dev, uint16_t delay)
 	return ret;
 }
 
-static int adin2111_route_set(const struct device *dev, const struct ethernet_switch_route *route,
-			      bool set);
+static int adin2111_filtering_entry_set(const struct device *dev,
+					const struct ethernet_switch_filtering_entry *entry,
+					bool set);
 
 static int adin2111_init(const struct device *dev)
 {
@@ -1497,15 +1498,20 @@ static int adin2111_init(const struct device *dev)
 	 * forward them to the other port. The filter table takes entries now the cut through is on.
 	 */
 	if (IS_ENABLED(CONFIG_NET_LLDP)) {
-		const struct ethernet_switch_route lldp = {
-			.mac_address = { .addr = { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } },
-			.ports = is_adin2111 ? (BIT(0) | BIT(1)) : BIT(0),
-			.action = ETHERNET_SWITCH_ACTION_HOST,
+		const struct ethernet_switch_port_map to_host = {
+			.port_ref = ETHERNET_SWITCH_PORT_HOST,
+			.control_element = ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD,
+		};
+		const struct ethernet_switch_filtering_entry lldp = {
+			.address = { .addr = { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } },
+			.vids = ETHERNET_SWITCH_VID_ANY,
+			.port_map = &to_host,
+			.port_map_len = 1U,
 		};
 
-		ret = adin2111_route_set(dev, &lldp, true);
+		ret = adin2111_filtering_entry_set(dev, &lldp, true);
 		if (ret < 0) {
-			LOG_ERR("Failed to set the LLDP route, %d", ret);
+			LOG_ERR("Failed to set the LLDP filtering entry, %d", ret);
 			return ret;
 		}
 	}
@@ -1541,49 +1547,59 @@ static int adin2111_init(const struct device *dev)
 }
 
 /*
- * Routes. The chip forwards frames between its ports with the 16 destination address rules of its
- * receive filter table. The first ones are kept for the multicast, broadcast and port addresses,
- * the others are the routes of the user, and share the table with the filters set by
- * the port interfaces.
+ * Filtering entries. The chip forwards frames between its ports with the 16 destination address
+ * rules of its receive filter table. The first ones are kept for the multicast, broadcast and port
+ * addresses, the others are the filtering entries of the user, and share the table with the
+ * filters set by the port interfaces.
+ *
+ * A rule is for the frames received on some ports and sends them to the host and to the other
+ * port, so the port-map of an entry, which names the ports the frames are sent to, is turned into
+ * the rules of each input port.
  */
-static uint32_t adin2111_route_ports_mask(const struct device *dev)
+static uint32_t adin2111_switch_ports_mask(const struct device *dev)
 {
 	const struct adin2111_config *cfg = dev->config;
 
 	return (cfg->id == ADIN2111_MAC) ? (BIT(0) | BIT(1)) : BIT(0);
 }
 
-/* The rule bits of a set of ports and an action, or -EINVAL if the chip cannot do them */
-static int adin2111_route_rules(const struct device *dev, uint32_t ports, uint8_t action,
-				uint32_t *rules)
+/* The TO_HOST and TO_OTHER_PORT bits of the frames received on a port, or -EINVAL / -ENOTSUP if
+ * the chip cannot do the port-map
+ */
+static int adin2111_port_map_rules(const struct device *dev, uint8_t input_port,
+				   const struct ethernet_switch_port_map *port_map,
+				   size_t port_map_len, uint32_t *rules)
 {
+	const uint32_t ports = adin2111_switch_ports_mask(dev);
 	uint32_t val = 0U;
 
-	if (ports == 0U || (ports & ~adin2111_route_ports_mask(dev)) != 0U ||
-	    (action & ~(ETHERNET_SWITCH_ACTION_HOST | ETHERNET_SWITCH_ACTION_FORWARD)) != 0U) {
+	if (port_map == NULL && port_map_len != 0U) {
 		return -EINVAL;
 	}
 
-	/* A single port has no other port to forward to */
-	if ((action & ETHERNET_SWITCH_ACTION_FORWARD) != 0U &&
-	    adin2111_route_ports_mask(dev) == BIT(0)) {
-		return -EINVAL;
-	}
+	for (size_t i = 0; i < port_map_len; i++) {
+		const uint8_t port_ref = port_map[i].port_ref;
 
-	if ((ports & BIT(0)) != 0U) {
-		val |= ADIN2111_ADDR_APPLY2PORT1;
-	}
+		if (port_ref != ETHERNET_SWITCH_PORT_HOST &&
+		    (port_ref >= 32U || (BIT(port_ref) & ports) == 0U)) {
+			return -EINVAL;
+		}
 
-	if ((ports & BIT(1)) != 0U) {
-		val |= ADIN2111_ADDR_APPLY2PORT2;
-	}
+		if (port_map[i].control_element ==
+		    ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD_FILTER) {
+			return -ENOTSUP;
+		}
 
-	if ((action & ETHERNET_SWITCH_ACTION_HOST) != 0U) {
-		val |= ADIN2111_ADDR_TO_HOST;
-	}
+		if (port_map[i].control_element != ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD) {
+			continue;
+		}
 
-	if ((action & ETHERNET_SWITCH_ACTION_FORWARD) != 0U) {
-		val |= ADIN2111_ADDR_TO_OTHER_PORT;
+		if (port_ref == ETHERNET_SWITCH_PORT_HOST) {
+			val |= ADIN2111_ADDR_TO_HOST;
+		} else if (port_ref != input_port) {
+			/* The chip never sends a frame back to the port it came from */
+			val |= ADIN2111_ADDR_TO_OTHER_PORT;
+		}
 	}
 
 	*rules = val;
@@ -1591,13 +1607,13 @@ static int adin2111_route_rules(const struct device *dev, uint32_t ports, uint8_
 	return 0;
 }
 
-/* Find the entry of an address for exactly the ports in apply, or -ENOENT */
-static int adin2111_find_route(const struct device *dev, const uint8_t *mac, uint32_t apply)
+/* Next slot of an address from the given one, or -ENOENT */
+static int adin2111_find_filtering_slot(const struct device *dev, const uint8_t *mac, int from)
 {
 	uint32_t reg;
 	int ret;
 
-	for (int i = ADIN2111_FILTER_FIRST_SLOT; i < ADIN2111_FILTER_SLOTS; i++) {
+	for (int i = from; i < ADIN2111_FILTER_SLOTS; i++) {
 		const int offset = i << 1;
 
 		ret = eth_adin2111_reg_read(dev, ADIN2111_ADDR_FILT_UPR + offset, &reg);
@@ -1605,8 +1621,7 @@ static int adin2111_find_route(const struct device *dev, const uint8_t *mac, uin
 			return ret;
 		}
 
-		if ((reg & UINT16_MAX) != sys_get_be16(&mac[0]) ||
-		    (reg & (ADIN2111_ADDR_APPLY2PORT1 | ADIN2111_ADDR_APPLY2PORT2)) != apply) {
+		if (reg == 0U || (reg & UINT16_MAX) != sys_get_be16(&mac[0])) {
 			continue;
 		}
 
@@ -1623,7 +1638,7 @@ static int adin2111_find_route(const struct device *dev, const uint8_t *mac, uin
 	return -ENOENT;
 }
 
-static int adin2111_find_free_route(const struct device *dev)
+static int adin2111_find_free_filtering_slot(const struct device *dev)
 {
 	uint32_t reg;
 	int ret;
@@ -1642,51 +1657,123 @@ static int adin2111_find_free_route(const struct device *dev)
 	return -ENOSPC;
 }
 
-static int adin2111_route_set(const struct device *dev, const struct ethernet_switch_route *route,
-			      bool set)
+/* Remove the slots of an address that the user set, the number of slots or a negative error */
+static int adin2111_remove_filtering_slots(const struct device *dev, const uint8_t *mac)
 {
-	uint32_t rules;
-	int slot;
+	uint8_t zero[NET_ETH_ADDR_LEN] = { 0 };
+	int removed = 0;
+	int slot = ADIN2111_FILTER_FIRST_SLOT;
+
+	while ((slot = adin2111_find_filtering_slot(dev, mac, slot)) >= 0) {
+		int ret = adin2111_write_filter_address(dev, zero, zero, 0, slot);
+
+		if (ret < 0) {
+			return ret;
+		}
+
+		removed++;
+		slot++;
+	}
+
+	if (slot < 0 && slot != -ENOENT) {
+		return slot;
+	}
+
+	return removed;
+}
+
+static int adin2111_filtering_entry_set(const struct device *dev,
+					const struct ethernet_switch_filtering_entry *entry,
+					bool set)
+{
+	const uint32_t ports = adin2111_switch_ports_mask(dev);
+	uint32_t port_rules[2] = { 0U, 0U };
+	uint32_t apply[2] = { 0U, 0U };
+	size_t groups = 0U;
 	int ret;
 
-	if (route == NULL) {
+	if (entry == NULL || entry->database_id != 0U) {
 		return -EINVAL;
 	}
 
-	ret = adin2111_route_rules(dev, route->ports, route->action, &rules);
-	if (ret < 0) {
-		return ret;
+	/* One filtering database, matched on the address only: no VLAN, no extended lookup and no
+	 * stream identification in this chip.
+	 */
+	if (entry->vids != ETHERNET_SWITCH_VID_ANY || entry->ext_lookup != NULL ||
+	    entry->stream_identification != NULL) {
+		return -ENOTSUP;
+	}
+
+	if (set) {
+		for (uint8_t port = 0U; port < 2U; port++) {
+			if ((ports & BIT(port)) == 0U) {
+				continue;
+			}
+
+			ret = adin2111_port_map_rules(dev, port, entry->port_map,
+						      entry->port_map_len, &port_rules[port]);
+			if (ret < 0) {
+				return ret;
+			}
+		}
+
+		/* The ports with the same rules share an entry of the table */
+		if (ports == (BIT(0) | BIT(1)) && port_rules[0] == port_rules[1]) {
+			apply[0] = ADIN2111_ADDR_APPLY2PORT1 | ADIN2111_ADDR_APPLY2PORT2;
+			port_rules[0] |= apply[0];
+			groups = 1U;
+		} else {
+			apply[0] = ADIN2111_ADDR_APPLY2PORT1;
+			port_rules[0] |= apply[0];
+			groups = 1U;
+
+			if (ports == (BIT(0) | BIT(1))) {
+				apply[1] = ADIN2111_ADDR_APPLY2PORT2;
+				port_rules[1] |= apply[1];
+				groups = 2U;
+			}
+		}
 	}
 
 	(void)eth_adin2111_lock(dev, K_FOREVER);
 
-	/* An address has one entry per set of ports, a new route replaces it */
-	slot = adin2111_find_route(dev, route->mac_address.addr,
-				   rules & (ADIN2111_ADDR_APPLY2PORT1 | ADIN2111_ADDR_APPLY2PORT2));
+	/* A new entry replaces the one of the address */
+	ret = adin2111_remove_filtering_slots(dev, entry->address.addr);
+	if (ret >= 0 && !set && ret == 0) {
+		ret = -ENOENT;
+	} else if (ret >= 0) {
+		ret = 0;
+	}
 
-	if (set) {
-		if (slot == -ENOENT) {
-			slot = adin2111_find_free_route(dev);
+	for (size_t i = 0; set && ret == 0 && i < groups; i++) {
+		int slot = adin2111_find_free_filtering_slot(dev);
+
+		if (slot < 0) {
+			ret = slot;
+			break;
 		}
 
-		if (slot >= 0) {
-			/* Entries past the second have no mask, so it is an exact match */
-			slot = adin2111_write_filter_address(dev, (uint8_t *)route->mac_address.addr,
-							     NULL, rules, slot);
+		/* Entries past the second have no mask, so it is an exact match */
+		slot = adin2111_write_filter_address(dev, (uint8_t *)entry->address.addr, NULL,
+						     port_rules[i], slot);
+		if (slot < 0) {
+			ret = slot;
 		}
-	} else if (slot >= 0) {
-		uint8_t zero[NET_ETH_ADDR_LEN] = { 0 };
+	}
 
-		slot = adin2111_write_filter_address(dev, zero, zero, 0, slot);
+	if (set && ret < 0) {
+		/* Do not leave half of the entry */
+		(void)adin2111_remove_filtering_slots(dev, entry->address.addr);
 	}
 
 	(void)eth_adin2111_unlock(dev);
 
-	return slot;
+	return ret;
 }
 
-static int adin2111_route_foreach(const struct device *dev, ethernet_switch_route_cb_t cb,
-				  void *user_data)
+static int adin2111_filtering_entry_foreach(const struct device *dev,
+					    ethernet_switch_filtering_entry_cb_t cb,
+					    void *user_data)
 {
 	if (cb == NULL) {
 		return -EINVAL;
@@ -1694,7 +1781,11 @@ static int adin2111_route_foreach(const struct device *dev, ethernet_switch_rout
 
 	/* The callback is called without the device locked, so it can call the other operations */
 	for (int i = ADIN2111_FILTER_FIRST_SLOT; i < ADIN2111_FILTER_SLOTS; i++) {
-		struct ethernet_switch_route route = { 0 };
+		struct ethernet_switch_port_map port_map[3];
+		struct ethernet_switch_filtering_entry entry = {
+			.vids = ETHERNET_SWITCH_VID_ANY,
+			.port_map = port_map,
+		};
 		uint32_t upr = 0U;
 		uint32_t lwr = 0U;
 		int ret;
@@ -1716,48 +1807,80 @@ static int adin2111_route_foreach(const struct device *dev, ethernet_switch_rout
 			continue;
 		}
 
-		sys_put_be16((uint16_t)(upr & UINT16_MAX), &route.mac_address.addr[0]);
-		sys_put_be32(lwr, &route.mac_address.addr[2]);
+		sys_put_be16((uint16_t)(upr & UINT16_MAX), &entry.address.addr[0]);
+		sys_put_be32(lwr, &entry.address.addr[2]);
 
-		route.ports = (((upr & ADIN2111_ADDR_APPLY2PORT1) != 0U) ? BIT(0) : 0U) |
-			      (((upr & ADIN2111_ADDR_APPLY2PORT2) != 0U) ? BIT(1) : 0U);
-		route.action = (((upr & ADIN2111_ADDR_TO_HOST) != 0U) ?
-				ETHERNET_SWITCH_ACTION_HOST : 0U) |
-			       (((upr & ADIN2111_ADDR_TO_OTHER_PORT) != 0U) ?
-				ETHERNET_SWITCH_ACTION_FORWARD : 0U);
+		if ((upr & ADIN2111_ADDR_TO_HOST) != 0U) {
+			port_map[entry.port_map_len].port_ref = ETHERNET_SWITCH_PORT_HOST;
+			port_map[entry.port_map_len++].control_element =
+				ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD;
+		}
 
-		cb(&route, user_data);
+		if ((upr & ADIN2111_ADDR_TO_OTHER_PORT) != 0U) {
+			/* The frames from a port go to the other one */
+			const bool from_port1 = (upr & ADIN2111_ADDR_APPLY2PORT1) != 0U;
+			const bool from_port2 = (upr & ADIN2111_ADDR_APPLY2PORT2) != 0U;
+
+			if (from_port2) {
+				port_map[entry.port_map_len].port_ref = 0U;
+				port_map[entry.port_map_len++].control_element =
+					ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD;
+			}
+
+			if (from_port1) {
+				port_map[entry.port_map_len].port_ref = 1U;
+				port_map[entry.port_map_len++].control_element =
+					ETHERNET_SWITCH_CONTROL_ELEMENT_FORWARD;
+			}
+		}
+
+		cb(&entry, user_data);
 	}
 
 	return 0;
 }
 
 /* The default rule of the frames from an unknown destination, a pair of bits per port */
-static int adin2111_default_route_set(const struct device *dev, uint32_t ports, uint8_t action)
+static int adin2111_default_port_map_set(const struct device *dev, uint32_t input_port_list,
+					 const struct ethernet_switch_port_map *port_map,
+					 size_t port_map_len)
 {
+	const uint32_t ports = adin2111_switch_ports_mask(dev);
 	uint32_t mask = 0U;
 	uint32_t val = 0U;
-	uint32_t rules;
 	int ret;
 
-	ret = adin2111_route_rules(dev, ports, action, &rules);
-	if (ret < 0) {
-		return ret;
+	if (input_port_list == 0U || (input_port_list & ~ports) != 0U) {
+		return -EINVAL;
 	}
 
-	if ((ports & BIT(0)) != 0U) {
+	if ((input_port_list & BIT(0)) != 0U) {
+		uint32_t rules;
+
+		ret = adin2111_port_map_rules(dev, 0U, port_map, port_map_len, &rules);
+		if (ret < 0) {
+			return ret;
+		}
+
 		mask |= ADIN2111_CONFIG2_P1_FWD_UNK2P2 | ADIN2111_CONFIG2_P1_FWD_UNK2HOST;
-		val |= ((action & ETHERNET_SWITCH_ACTION_FORWARD) != 0U) ?
+		val |= ((rules & ADIN2111_ADDR_TO_OTHER_PORT) != 0U) ?
 		       ADIN2111_CONFIG2_P1_FWD_UNK2P2 : 0U;
-		val |= ((action & ETHERNET_SWITCH_ACTION_HOST) != 0U) ?
+		val |= ((rules & ADIN2111_ADDR_TO_HOST) != 0U) ?
 		       ADIN2111_CONFIG2_P1_FWD_UNK2HOST : 0U;
 	}
 
-	if ((ports & BIT(1)) != 0U) {
+	if ((input_port_list & BIT(1)) != 0U) {
+		uint32_t rules;
+
+		ret = adin2111_port_map_rules(dev, 1U, port_map, port_map_len, &rules);
+		if (ret < 0) {
+			return ret;
+		}
+
 		mask |= ADIN2111_CONFIG2_P2_FWD_UNK2P1 | ADIN2111_CONFIG2_P2_FWD_UNK2HOST;
-		val |= ((action & ETHERNET_SWITCH_ACTION_FORWARD) != 0U) ?
+		val |= ((rules & ADIN2111_ADDR_TO_OTHER_PORT) != 0U) ?
 		       ADIN2111_CONFIG2_P2_FWD_UNK2P1 : 0U;
-		val |= ((action & ETHERNET_SWITCH_ACTION_HOST) != 0U) ?
+		val |= ((rules & ADIN2111_ADDR_TO_HOST) != 0U) ?
 		       ADIN2111_CONFIG2_P2_FWD_UNK2HOST : 0U;
 	}
 
@@ -1780,9 +1903,9 @@ static struct net_if *adin2111_get_port_iface(const struct device *dev, uint8_t 
 }
 
 static const struct ethernet_switch_api adin2111_switch_api = {
-	.route_set = adin2111_route_set,
-	.route_foreach = adin2111_route_foreach,
-	.default_route_set = adin2111_default_route_set,
+	.filtering_entry_set = adin2111_filtering_entry_set,
+	.filtering_entry_foreach = adin2111_filtering_entry_foreach,
+	.default_port_map_set = adin2111_default_port_map_set,
 	.get_port_iface = adin2111_get_port_iface,
 };
 
