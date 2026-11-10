@@ -1368,6 +1368,9 @@ int eth_adin2111_sw_reset(const struct device *dev, uint16_t delay)
 	return ret;
 }
 
+static int adin2111_route_set(const struct device *dev, const struct ethernet_switch_route *route,
+			      bool set);
+
 static int adin2111_init(const struct device *dev)
 {
 	const struct adin2111_config *cfg = dev->config;
@@ -1487,6 +1490,24 @@ static int adin2111_init(const struct device *dev)
 	if (ret < 0) {
 		LOG_ERR("Failed to write CONFIG2, %d", ret);
 		return ret;
+	}
+
+	/* LLDP belongs to the link of each port: the frames for the nearest bridge address are
+	 * delivered to the host, with the port interface they came in by, and the chip does not
+	 * forward them to the other port. The filter table takes entries now the cut through is on.
+	 */
+	if (IS_ENABLED(CONFIG_NET_LLDP)) {
+		const struct ethernet_switch_route lldp = {
+			.mac_address = { .addr = { 0x01, 0x80, 0xC2, 0x00, 0x00, 0x0E } },
+			.ports = is_adin2111 ? (BIT(0) | BIT(1)) : BIT(0),
+			.action = ETHERNET_SWITCH_ACTION_HOST,
+		};
+
+		ret = adin2111_route_set(dev, &lldp, true);
+		if (ret < 0) {
+			LOG_ERR("Failed to set the LLDP route, %d", ret);
+			return ret;
+		}
 	}
 
 	/* configure interrupt masks */
