@@ -191,6 +191,13 @@ static int ethernet_set_config(uint64_t mgmt_request,
 
 		memcpy(&config.filter, &params->filter, sizeof(struct ethernet_filter));
 		type = ETHERNET_CONFIG_TYPE_FILTER;
+	} else if (mgmt_request == NET_REQUEST_ETHERNET_SET_MAC_FORWARD_FILTER) {
+		if (!is_hw_caps_supported(dev, iface, ETHERNET_HW_FORWARD_FILTERING)) {
+			return -ENOTSUP;
+		}
+
+		memcpy(&config.forward_filter, &params->filter, sizeof(struct ethernet_filter));
+		type = ETHERNET_CONFIG_TYPE_FORWARD_FILTER;
 	} else {
 		return -EINVAL;
 	}
@@ -220,6 +227,9 @@ NET_MGMT_REGISTER_REQUEST_HANDLER(NET_REQUEST_ETHERNET_SET_TXINJECTION_MODE,
 				  ethernet_set_config);
 
 NET_MGMT_REGISTER_REQUEST_HANDLER(NET_REQUEST_ETHERNET_SET_MAC_FILTER,
+				  ethernet_set_config);
+
+NET_MGMT_REGISTER_REQUEST_HANDLER(NET_REQUEST_ETHERNET_SET_MAC_FORWARD_FILTER,
 				  ethernet_set_config);
 
 static int ethernet_get_config(uint64_t mgmt_request,

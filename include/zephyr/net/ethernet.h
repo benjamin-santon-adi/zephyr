@@ -210,6 +210,11 @@ enum ethernet_hw_caps {
 	 *  @ref ethernet_stp_port_state.
 	 */
 	ETHERNET_HW_STP_PORT_STATE	= BIT(22),
+
+	/** Hardware forwarding of frames between ports can be allowed or
+	 *  denied per MAC address, see @ref net_eth_mac_forward_filter.
+	 */
+	ETHERNET_HW_FORWARD_FILTERING	= BIT(23),
 };
 
 /** @cond INTERNAL_HIDDEN */
@@ -238,6 +243,7 @@ enum ethernet_config_type {
 	ETHERNET_CONFIG_TYPE_EXTRA_TX_PKT_HEADROOM,
 	ETHERNET_CONFIG_TYPE_STP_PORT_STATE,
 	ETHERNET_CONFIG_TYPE_FDB_FLUSH,
+	ETHERNET_CONFIG_TYPE_FORWARD_FILTER,
 };
 
 enum ethernet_qav_param_type {
@@ -559,6 +565,8 @@ struct ethernet_config {
 		enum ethernet_checksum_support chksum_support;
 
 		struct ethernet_filter filter;
+		/** Same layout as @c filter, used with ETHERNET_CONFIG_TYPE_FORWARD_FILTER */
+		struct ethernet_filter forward_filter;
 
 		uint16_t extra_tx_pkt_headroom;
 
@@ -1663,6 +1671,26 @@ int net_eth_txinjection_mode(struct net_if *iface, bool enable);
  */
 int net_eth_mac_filter(struct net_if *iface, struct net_eth_addr *mac,
 		       enum ethernet_filter_type type, bool enable);
+
+/**
+ * @brief Allow or deny the hardware forwarding of frames matching @p mac.
+ *
+ * @details This is the forwarding counterpart of net_eth_mac_filter(): the
+ * filter tells whether a frame is received by the host, this one tells whether
+ * the device forwards it to its other ports. The interface needs the
+ * @ref ETHERNET_HW_FORWARD_FILTERING capability.
+ *
+ * @param iface Network interface
+ * @param mac Pointer to an ethernet MAC address
+ * @param type Match on the source or on the destination address
+ * @param allow Allow (true) or deny (false) the forwarding
+ *
+ * @retval 0 The forwarding rule was applied.
+ * @retval -ENOTSUP The interface or the filter type is not supported.
+ * @retval <0 Other error from the driver.
+ */
+int net_eth_mac_forward_filter(struct net_if *iface, struct net_eth_addr *mac,
+			       enum ethernet_filter_type type, bool allow);
 
 /**
  * @brief Return the PHY device that is tied to this ethernet network interface.

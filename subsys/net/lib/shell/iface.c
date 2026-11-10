@@ -62,6 +62,7 @@ static struct ethernet_capabilities eth_hw_caps[] = {
 #endif
 	EC(ETHERNET_PRIORITY_QUEUES,      "Priority queues"),
 	EC(ETHERNET_HW_FILTERING,         "MAC address filtering"),
+	EC(ETHERNET_HW_FORWARD_FILTERING, "MAC address forward filtering"),
 #ifdef CONFIG_NET_DSA
 	EC(ETHERNET_DSA_USER_PORT,        "DSA user port"),
 	EC(ETHERNET_DSA_CONDUIT_PORT,     "DSA conduit port"),
