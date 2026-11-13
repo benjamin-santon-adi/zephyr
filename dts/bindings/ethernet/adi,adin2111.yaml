@@ -28,7 +28,12 @@ properties:
     description: Enables Open Alliance SPI protocol protection.
 
 child-binding:
-  description: Port properties
+  description: |
+    Port properties.
+
+    The children port1 and port2 are the two ports of the ADIN2111. Each one
+    is a network device with its own network interface, that other nodes can
+    refer to, for example the ports of a zephyr,ethernet-bridge.
   properties:
     local-mac-address:
       type: uint8-array

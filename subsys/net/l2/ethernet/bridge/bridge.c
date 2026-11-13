@@ -17,6 +17,8 @@ LOG_MODULE_REGISTER(net_eth_bridge, CONFIG_NET_ETHERNET_BRIDGE_LOG_LEVEL);
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/virtual.h>
 #include <zephyr/net/ethernet_bridge.h>
+#include <zephyr/net/ethernet_mgmt.h>
+#include <zephyr/net/net_mgmt.h>
 #if defined(CONFIG_NET_ETHERNET_BRIDGE_FDB)
 #include <zephyr/net/ethernet_bridge_fdb.h>
 #endif
@@ -99,6 +101,30 @@ int eth_bridge_get_index(struct net_if *br)
 struct net_if *eth_bridge_get_by_index(int index)
 {
 	return net_if_get_by_index(index);
+}
+
+/* A port that is not in promiscuous mode and filters the received frames by address must let
+ * through the frames for the address of the bridge, it keeps its own address.
+ */
+static int bridge_port_accept_addr(struct net_if *br, struct net_if *port, bool set)
+{
+	struct net_linkaddr *bridge_addr = net_if_get_link_addr(br);
+	struct ethernet_req_params params = {
+		.filter = {
+			.type = ETHERNET_FILTER_TYPE_DST_MAC_ADDRESS,
+			.set = set,
+		},
+	};
+
+	if ((net_eth_get_hw_capabilities(port) & ETHERNET_HW_FILTERING) == 0 ||
+	    net_linkaddr_cmp(net_if_get_link_addr(port), bridge_addr)) {
+		return 0;
+	}
+
+	memcpy(params.filter.mac_address.addr, bridge_addr->addr,
+	       sizeof(params.filter.mac_address.addr));
+
+	return net_mgmt(NET_REQUEST_ETHERNET_SET_MAC_FILTER, port, &params, sizeof(params));
 }
 
 int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
@@ -237,6 +263,17 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 	}
 
 #endif
+	if (hw_fwd) {
+		/* The port is not in promiscuous mode */
+		ret = bridge_port_accept_addr(br, iface, true);
+		if (ret != 0) {
+			NET_DBG("iface %d does not accept the address of bridge %d: %d",
+				net_if_get_by_iface(iface), net_if_get_by_iface(br), ret);
+			eth_bridge_iface_remove(br, iface);
+			return ret;
+		}
+	}
+
 	NET_DBG("iface %d added to bridge %d", net_if_get_by_iface(iface),
 		net_if_get_by_iface(br));
 
@@ -259,12 +296,14 @@ int eth_bridge_iface_remove(struct net_if *br, struct net_if *iface)
 	struct eth_bridge_iface_context *ctx;
 	struct ethernet_context *eth_ctx = net_if_l2_data(iface);
 	bool found = false;
+	bool hw_fwd;
 	int count = 0;
 
 	NET_ASSERT(dev != NULL);
 	NET_ASSERT(eth_ctx != NULL);
 
 	ctx = dev->data;
+	hw_fwd = ctx->hw_forwarding;
 
 	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET)) {
 		return -EINVAL;
@@ -311,6 +350,11 @@ int eth_bridge_iface_remove(struct net_if *br, struct net_if *iface)
 
 	NET_DBG("iface %d removed from bridge %d", net_if_get_by_iface(iface),
 		net_if_get_by_iface(br));
+
+	if (found && hw_fwd) {
+		/* Nothing to undo when the address was never accepted */
+		(void)bridge_port_accept_addr(br, iface, false);
+	}
 
 	if (count == 0) {
 		/* The next port tells how the bridge forwards */

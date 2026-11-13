@@ -34,6 +34,7 @@ LOG_MODULE_REGISTER(net_core, CONFIG_NET_CORE_LOG_LEVEL);
 #include <zephyr/net/gptp.h>
 #include <zephyr/net/websocket.h>
 #include <zephyr/net/ethernet.h>
+#include <zephyr/net/ethernet_bridge.h>
 #if defined(CONFIG_NET_DSA)
 #include <zephyr/net/dsa_core.h>
 #endif
@@ -725,6 +726,13 @@ static int net_init(void)
 	init_rx_queues();
 
 	services_init();
+
+	/* The bridges of the devicetree take their ports once these are initialized, and before
+	 * the interfaces are brought up.
+	 */
+	if (IS_ENABLED(CONFIG_NET_ETHERNET_BRIDGE_DT)) {
+		eth_bridge_dt_init();
+	}
 
 	/* This will take all interfaces up, that have autostart enabled. */
 	net_if_post_init();

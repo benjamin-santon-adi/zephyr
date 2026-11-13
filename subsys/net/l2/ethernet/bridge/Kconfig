@@ -5,6 +5,8 @@
 
 menuconfig NET_ETHERNET_BRIDGE
 	bool "Ethernet Bridging support"
+	default y if DT_HAS_ZEPHYR_ETHERNET_BRIDGE_ENABLED
+	select NET_L2_ETHERNET_MGMT
 	select NET_PROMISCUOUS_MODE
 	select NET_L2_VIRTUAL
 	help
@@ -90,8 +92,20 @@ config NET_ETHERNET_BRIDGE_SHELL
 	help
 	  Enables shell utility to manage bridge configuration interactively.
 
+config NET_ETHERNET_BRIDGE_DT
+	bool "Create the bridges of the devicetree"
+	default y
+	depends on DT_HAS_ZEPHYR_ETHERNET_BRIDGE_ENABLED
+	help
+	  Create a bridge of the ports for each zephyr,ethernet-bridge node of
+	  the devicetree, and bring it up. It is done when the network stack
+	  has initialized the interfaces, after the Ethernet drivers and before
+	  the interfaces are brought up. The bridges are the first free ones of
+	  NET_ETHERNET_BRIDGE_COUNT, in the order of the nodes.
+
 config NET_ETHERNET_BRIDGE_FDB
 	bool "FDB (Forwarding database) table support"
+	default y if NET_ETHERNET_BRIDGE_DT
 	help
 	  Enables FDB (Forwarding database) table support.
 

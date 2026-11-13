@@ -506,7 +506,16 @@ int net_config_init_app(const struct device *dev, const char *app_info)
 		NET_ERR("Cannot setup IEEE 802.15.4 interface (%d)", ret);
 	}
 
-	/* Only try to use a network interface that is auto started */
+	/* Only try to use a network interface that is auto started, the default one if it is */
+	if (iface == NULL) {
+		struct net_if *default_iface = net_if_get_default();
+
+		if (default_iface != NULL &&
+		    !net_if_flag_is_set(default_iface, NET_IF_NO_AUTO_START)) {
+			iface = default_iface;
+		}
+	}
+
 	if (iface == NULL) {
 		net_if_foreach(iface_find_cb, &iface);
 	}

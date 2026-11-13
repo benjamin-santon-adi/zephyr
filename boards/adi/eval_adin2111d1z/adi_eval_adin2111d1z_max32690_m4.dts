@@ -66,6 +66,15 @@
 		led2 = &red_led;
 		sw0 = &pb0;
 	};
+
+	/* The ports forward between them in hardware, the IP configuration goes on the bridge.
+	 * The ports are told to also receive the frames for the address of the bridge.
+	 */
+	bridge0: bridge {
+		compatible = "zephyr,ethernet-bridge";
+		ports = <&adin2111_port1 &adin2111_port2>;
+		local-mac-address = [00 aa 22 fe da b8];
+	};
 };
 
 &clk_ipo {
@@ -143,13 +152,13 @@
 		spi-oa-protection;
 		status = "okay";
 
-		port1 {
+		adin2111_port1: port1 {
 			local-mac-address = [00 aa 22 fe da c8];
 			status = "okay";
 		};
 
-		port2 {
-			local-mac-address = [00 aa 22 fe da c8];
+		adin2111_port2: port2 {
+			local-mac-address = [00 aa 22 fe da d8];
 			status = "okay";
 		};
 

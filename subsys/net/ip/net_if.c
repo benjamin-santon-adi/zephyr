@@ -681,6 +681,20 @@ void net_if_set_default(struct net_if *iface)
 	default_iface = iface;
 }
 
+#if defined(CONFIG_NET_DEFAULT_IF_BRIDGE)
+static struct net_if *net_if_get_first_bridge(void)
+{
+	STRUCT_SECTION_FOREACH(net_if, iface) {
+		if (net_if_l2(iface) == &NET_L2_GET_NAME(VIRTUAL) &&
+		    (net_virtual_get_iface_capabilities(iface) & VIRTUAL_INTERFACE_BRIDGE) != 0) {
+			return iface;
+		}
+	}
+
+	return NULL;
+}
+#endif /* CONFIG_NET_DEFAULT_IF_BRIDGE */
+
 struct net_if *net_if_get_default(void)
 {
 	struct net_if *iface = NULL;
@@ -720,6 +734,9 @@ struct net_if *net_if_get_default(void)
 #endif
 #if defined(CONFIG_NET_DEFAULT_IF_WIFI)
 	iface = net_if_get_first_wifi();
+#endif
+#if defined(CONFIG_NET_DEFAULT_IF_BRIDGE)
+	iface = net_if_get_first_bridge();
 #endif
 	return iface ? iface : _net_if_list_start;
 }

@@ -1536,8 +1536,12 @@ static DEVICE_API(ethernet, adin2111_port_api) = {
 #define ADIN2111_MDIO_PHY_BY_ADDR(adin_n, phy_addr)						\
 	DEVICE_DT_GET(DT_CHILD(DT_INST_CHILD(adin_n, mdio), ethernet_phy_##phy_addr))
 
+/* The node of a port, its device is what the other nodes (a bridge) refer to */
+#define ADIN2111_PORT_NODE(adin_n, port_n)							\
+	DT_CHILD(DT_DRV_INST(adin_n), port##port_n)
+
 #define ADIN2111_PORT_MAC(adin_n, port_n)							\
-	DT_PROP(DT_CHILD(DT_DRV_INST(adin_n), port##port_n), local_mac_address)
+	DT_PROP(ADIN2111_PORT_NODE(adin_n, port_n), local_mac_address)
 
 #define ADIN2111_PORT_DEVICE_INIT_INSTANCE(parent_n, port_n, phy_n, name)			\
 	static struct adin2111_port_data name##_port_data_##port_n = {				\
@@ -1549,10 +1553,9 @@ static DEVICE_API(ethernet, adin2111_port_api) = {
 		.port_idx = port_n,								\
 		.phy_addr = phy_n,								\
 	};											\
-	ETH_NET_DEVICE_INIT_INSTANCE(name##_port_##port_n, "port_" ADIN2111_XSTR(port_n),	\
-				     port_n, NULL, NULL, &name##_port_data_##port_n,		\
-				     &name##_port_config_##port_n, CONFIG_ETH_INIT_PRIORITY,	\
-				     &adin2111_port_api, NET_ETH_MTU);
+	ETH_NET_DEVICE_DT_DEFINE(ADIN2111_PORT_NODE(parent_n, phy_n), NULL, NULL,		\
+				 &name##_port_data_##port_n, &name##_port_config_##port_n,	\
+				 CONFIG_ETH_INIT_PRIORITY, &adin2111_port_api, NET_ETH_MTU);
 
 #define ADIN2111_SPI_OPERATION									\
 	((uint16_t)(SPI_OP_MODE_CONTROLLER | SPI_TRANSFER_MSB | SPI_WORD_SET(8)))

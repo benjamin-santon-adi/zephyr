@@ -896,6 +896,7 @@ config NET_LINK_ADDR_CUSTOM_LENGTH
 choice NET_DEFAULT_IF
 	prompt "Default Network Interface"
 	default NET_DEFAULT_IF_DUMMY if NET_TEST
+	default NET_DEFAULT_IF_BRIDGE if NET_ETHERNET_BRIDGE_DT
 	default NET_DEFAULT_IF_FIRST
 	help
 	  If system has multiple interfaces enabled, then user shall be able
@@ -938,6 +939,14 @@ config NET_DEFAULT_IF_OFFLOADED_NETDEV
 config NET_DEFAULT_IF_WIFI
 	bool "WiFi interface"
 	depends on NET_L2_ETHERNET
+
+config NET_DEFAULT_IF_BRIDGE
+	bool "Ethernet bridge"
+	depends on NET_ETHERNET_BRIDGE
+	help
+	  The first Ethernet bridge interface is the default one. It is the
+	  interface that carries the IP configuration when the ports of a
+	  bridge are not configured.
 
 endchoice
 

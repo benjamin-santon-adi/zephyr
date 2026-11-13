@@ -94,6 +94,11 @@ struct eth_bridge_iface_context {
 	bool hw_forwarding : 1;
 };
 
+/* Create the bridges of the devicetree, called by the network stack with
+ * CONFIG_NET_ETHERNET_BRIDGE_DT, once the interfaces are initialized and before they are up.
+ */
+void eth_bridge_dt_init(void);
+
 /** @endcond */
 
 /**

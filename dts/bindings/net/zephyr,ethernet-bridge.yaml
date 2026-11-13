@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Ethernet bridge of Ethernet network interfaces, created at start-up.
+
+  The bridge is a network interface of its own, the IP configuration of the host
+  goes on it. When the ports forward between them in hardware (they report
+  ETHERNET_HW_PORT_FORWARDING), the bridge does not forward anything in
+  software: it learns on which port each station is, delivers the frames for
+  the host and sends the frames of the host out of the port of their
+  destination.
+
+  Example:
+
+    / {
+            bridge0: bridge {
+                    compatible = "zephyr,ethernet-bridge";
+                    ports = <&port1 &port2>;
+                    local-mac-address = [00 aa 22 fe da c8];
+            };
+    };
+
+compatible: "zephyr,ethernet-bridge"
+
+include: base.yaml
+
+properties:
+  ports:
+    type: phandles
+    required: true
+    description: |
+      The network devices whose network interface is a port of the bridge, at
+      least two. A device needs one network interface.
+
+  local-mac-address:
+    type: uint8-array
+    description: |
+      MAC address of the bridge interface. It is the address of the first port
+      when it is not set. The ports keep their own addresses. A port that
+      filters the received frames by address (ETHERNET_HW_FILTERING), like the
+      ADIN2111, is told to also let through the frames for this address.
