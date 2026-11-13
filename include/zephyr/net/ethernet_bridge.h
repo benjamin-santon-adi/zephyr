@@ -84,6 +84,14 @@ struct eth_bridge_iface_context {
 
 	/* Is the interface enabled or not */
 	bool status : 1;
+
+	/* The ports report ETHERNET_HW_PORT_FORWARDING, they forward between them
+	 * in hardware: the bridge only learns the ports of the stations, delivers
+	 * the frames for the host, and sends the frames of the host out of the port
+	 * the destination was learned on. Set when the first port is added, all the
+	 * ports of a bridge must agree. Its ports are not put into promiscuous mode.
+	 */
+	bool hw_forwarding : 1;
 };
 
 /** @endcond */
@@ -97,12 +105,17 @@ struct eth_bridge_iface_context {
  * After the setup is done, the bridge interface can be brought up so
  * that it can start bridging L2 traffic.
  *
+ * An interface whose device reports ETHERNET_HW_PORT_FORWARDING makes the bridge
+ * one that does not forward in software, and needs no promiscuous mode.
+ *
  * @param br A pointer to a bridge interface
  * @param iface Interface to add
  *
  * @return 0 if OK, negative error code otherwise. -ENOTSUP if the spanning
  *         tree protocol runs on @p br and @p iface forwards frames in hardware
- *         that its device cannot block, see eth_bridge_stp_enable().
+ *         that its device cannot block, see eth_bridge_stp_enable(). -EINVAL
+ *         if @p iface and the ports already added do not all forward in
+ *         hardware or not.
  */
 int eth_bridge_iface_add(struct net_if *br, struct net_if *iface);
 

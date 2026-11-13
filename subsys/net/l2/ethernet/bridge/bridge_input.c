@@ -136,6 +136,9 @@ enum net_verdict eth_bridge_input_process(struct net_if *iface, struct net_pkt *
 	struct net_eth_addr *bridge_addr;
 	enum net_verdict verdict = NET_DROP;
 	enum eth_bridge_port_state state;
+	/* The ports forward between them in hardware, so nothing is forwarded here */
+	const bool hw_fwd = ((struct eth_bridge_iface_context *)
+			     net_if_get_device(bridge)->data)->hw_forwarding;
 
 	NET_ASSERT(bridge_lladdr != NULL);
 
@@ -181,7 +184,7 @@ enum net_verdict eth_bridge_input_process(struct net_if *iface, struct net_pkt *
 	 * delivered locally whatever the FDB has for its address.
 	 */
 #if defined(CONFIG_NET_ETHERNET_BRIDGE_FDB)
-	if (memcmp(bridge_addr, dst_addr, NET_ETH_ADDR_LEN) != 0 &&
+	if (!hw_fwd && memcmp(bridge_addr, dst_addr, NET_ETH_ADDR_LEN) != 0 &&
 	    eth_bridge_fdb_forward(bridge, iface, pkt)) {
 		LOG_DBG("FDB handled forwarding pkt %p from iface %p to bridge %p",
 			pkt, iface, bridge);
@@ -198,7 +201,7 @@ enum net_verdict eth_bridge_input_process(struct net_if *iface, struct net_pkt *
 		/* Handle broadcast and multicast */
 
 		/* Forward broadcast/multicast packets */
-		if (eth_bridge_forward(bridge, iface, pkt) < 0) {
+		if (!hw_fwd && eth_bridge_forward(bridge, iface, pkt) < 0) {
 			LOG_ERR("Failed to forward broadcast/multicast pkt %p from iface %p to "
 				"bridge %p",
 				pkt, iface, bridge);
@@ -220,8 +223,12 @@ enum net_verdict eth_bridge_input_process(struct net_if *iface, struct net_pkt *
 			return NET_DROP;
 		}
 	} else {
-		/* Packet not meant for us, but forward it to other interfaces */
-		eth_bridge_forward(bridge, iface, pkt);
+		/* Packet not meant for us, but forward it to other interfaces,
+		 * unless the hardware already did.
+		 */
+		if (!hw_fwd) {
+			eth_bridge_forward(bridge, iface, pkt);
+		}
 		/* Always drop forwarded pkt for original iface */
 		NET_DBG("DROP: unicast to other address");
 		return NET_DROP;

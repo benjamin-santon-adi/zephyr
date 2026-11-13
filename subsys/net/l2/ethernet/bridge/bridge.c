@@ -109,6 +109,7 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 	enum eth_bridge_port_state state = ETH_BRIDGE_PORT_STATE_FORWARDING;
 	size_t added = SIZE_MAX;
 	bool found = false;
+	bool hw_fwd;
 	int count = 0;
 	int ret;
 
@@ -117,15 +118,23 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 
 	ctx = dev->data;
 
+	/* A port whose device forwards between its ports in hardware makes the
+	 * bridge one that does not forward in software.
+	 */
+	hw_fwd = (net_eth_get_hw_capabilities(iface) & ETHERNET_HW_PORT_FORWARDING) != 0;
+
 #if defined(CONFIG_NET_DSA)
 	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET) ||
-	    (eth_ctx->dsa_port != DSA_USER_PORT &&
+	    (!hw_fwd && eth_ctx->dsa_port != DSA_USER_PORT &&
 	     !(net_eth_get_hw_capabilities(iface) & ETHERNET_PROMISC_MODE))) {
 		return -EINVAL;
 	}
 #else
+	/* With forwarding in hardware the frames for the host are chosen by the
+	 * hardware, the port does not have to receive everything.
+	 */
 	if (net_if_l2(iface) != &NET_L2_GET_NAME(ETHERNET) ||
-	    !(net_eth_get_hw_capabilities(iface) & ETHERNET_PROMISC_MODE)) {
+	    (!hw_fwd && !(net_eth_get_hw_capabilities(iface) & ETHERNET_PROMISC_MODE))) {
 		return -EINVAL;
 	}
 #endif
@@ -152,6 +161,22 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 		}
 
 		state = ETH_BRIDGE_PORT_STATE_DISCARDING;
+	}
+
+	if (!found) {
+		bool has_ports = false;
+
+		ARRAY_FOR_EACH(ctx->ports, i) {
+			has_ports |= ctx->ports[i].iface != NULL;
+		}
+
+		/* The ports of a bridge either all forward in hardware or none does */
+		if (has_ports && ctx->hw_forwarding != hw_fwd) {
+			unlock_bridge(ctx);
+			return -EINVAL;
+		}
+
+		ctx->hw_forwarding = hw_fwd;
 	}
 
 	ARRAY_FOR_EACH(ctx->ports, i) {
@@ -187,7 +212,7 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 	}
 
 #if defined(CONFIG_NET_DSA)
-	if (eth_ctx->dsa_port != DSA_USER_PORT) {
+	if (!hw_fwd && eth_ctx->dsa_port != DSA_USER_PORT) {
 		ret = net_eth_promisc_mode(iface, true);
 		if (ret != 0 && ret != -EALREADY) {
 			NET_DBG("iface %d promiscuous mode failed: %d",
@@ -197,7 +222,7 @@ int eth_bridge_iface_add(struct net_if *br, struct net_if *iface)
 		}
 	}
 #else
-	ret = net_eth_promisc_mode(iface, true);
+	ret = hw_fwd ? 0 : net_eth_promisc_mode(iface, true);
 	if (ret != 0 && ret != -EALREADY) {
 		/* Ignore any errors when using native-sim driver,
 		 * we do not need host promiscuous working when testing
@@ -286,6 +311,11 @@ int eth_bridge_iface_remove(struct net_if *br, struct net_if *iface)
 
 	NET_DBG("iface %d removed from bridge %d", net_if_get_by_iface(iface),
 		net_if_get_by_iface(br));
+
+	if (count == 0) {
+		/* The next port tells how the bridge forwards */
+		ctx->hw_forwarding = false;
+	}
 
 	if (count < 2) {
 		ctx->is_setup = false;
@@ -629,9 +659,34 @@ static struct net_pkt *bridge_resolve_local_dst(struct net_if *bridge, struct ne
 #endif /* CONFIG_NET_IPV4 && CONFIG_NET_ARP */
 }
 
+#if defined(CONFIG_NET_ETHERNET_BRIDGE_FDB)
+/*
+ * The port the destination of a packet of the host was learned on, NULL for a
+ * broadcast, multicast or unknown destination.
+ */
+static struct net_if *bridge_hw_dst_port(struct net_if *bridge, struct net_pkt *pkt)
+{
+	struct net_linkaddr *dst = net_pkt_lladdr_dst(pkt);
+	struct net_if *port = NULL;
+
+	if (dst->len != sizeof(struct net_eth_addr) ||
+	    !net_eth_is_addr_valid((struct net_eth_addr *)dst->addr)) {
+		return NULL;
+	}
+
+	if (eth_bridge_fdb_lookup(bridge, (struct net_eth_addr *)dst->addr, &port, 1) == 0) {
+		return NULL;
+	}
+
+	return port;
+}
+#endif /* CONFIG_NET_ETHERNET_BRIDGE_FDB */
+
 /*
  * For direct TX, send pkt to all ifaces.
  * For forward TX (pkt from an original iface), send to all other ifaces.
+ * With forwarding in hardware there is no forward TX, the ports are only the
+ * ones of the destination when it is known.
  */
 static enum net_verdict bridge_iface_send_process(struct net_if *iface,
 						  struct net_pkt *pkt)
@@ -639,6 +694,7 @@ static enum net_verdict bridge_iface_send_process(struct net_if *iface,
 	const struct device *dev = net_if_get_device(iface);
 	struct eth_bridge_iface_context *ctx;
 	struct net_if *orig_iface;
+	struct net_if *hw_port = NULL;
 	struct net_pkt *send_pkt;
 	uint32_t fwd_ports = 0U;
 	int fwd_iface_num = 0;
@@ -663,13 +719,27 @@ static enum net_verdict bridge_iface_send_process(struct net_if *iface,
 
 	lock_bridge(ctx);
 
-	orig_iface = net_pkt_orig_iface(pkt);
+	if (ctx->hw_forwarding) {
+		/* Nothing is forwarded from a port, the interface the packet
+		 * came from is of no use.
+		 */
+		orig_iface = NULL;
+#if defined(CONFIG_NET_ETHERNET_BRIDGE_FDB)
+		hw_port = bridge_hw_dst_port(iface, pkt);
+#endif
+	} else {
+		orig_iface = net_pkt_orig_iface(pkt);
+	}
 
 	/* Pick the ports to forward to once, so that a port going down or
 	 * changing its state meanwhile cannot make the count below wrong.
 	 */
 	ARRAY_FOR_EACH(ctx->ports, i) {
 		struct net_if *port_iface = ctx->ports[i].iface;
+
+		if (hw_port != NULL && port_iface != hw_port) {
+			continue;
+		}
 
 		if (port_iface != NULL && port_iface != orig_iface) {
 			/* Skip it if not up or not forwarding */
