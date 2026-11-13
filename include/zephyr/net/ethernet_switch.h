@@ -259,6 +259,168 @@ static inline struct net_if *ethernet_switch_get_port_iface(const struct device 
 }
 
 /**
+ * @brief Port interface of a switch device
+ *
+ * A switch device has one interface for the host and one interface per physical port, all bound
+ * to the same device. They are created by ETH_NET_SWITCH_DEVICE_DT_INST_DEFINE().
+ */
+struct ethernet_switch_port {
+	/** Value of the reg property of the port node */
+	uint8_t port;
+	/** Name of the port node */
+	const char *name;
+	/** Interface of the port */
+	struct net_if *iface;
+};
+
+/** Port interfaces of a switch device, created by ETH_NET_SWITCH_PORTS_DT_INST_DEFINE() */
+struct ethernet_switch_ports {
+	/** Number of port interfaces */
+	size_t num;
+	/** The port interfaces */
+	const struct ethernet_switch_port *ports;
+};
+
+/**
+ * @brief Get the port of a port interface
+ *
+ * @param ports Port interfaces of the device, can be NULL
+ * @param iface Interface
+ *
+ * @return The reg value of the port node, or -1 if @p iface is not the interface of a port.
+ */
+static inline int ethernet_switch_iface_port(const struct ethernet_switch_ports *ports,
+					     const struct net_if *iface)
+{
+	for (size_t i = 0; ports != NULL && i < ports->num; i++) {
+		if (ports->ports[i].iface == iface) {
+			return ports->ports[i].port;
+		}
+	}
+
+	return -1;
+}
+
+/**
+ * @brief Get the interface of a port
+ *
+ * @param ports Port interfaces of the device, can be NULL
+ * @param port Value of the reg property of the port node
+ *
+ * @return The interface of the port, or NULL if there is none.
+ */
+static inline struct net_if *ethernet_switch_port_iface(const struct ethernet_switch_ports *ports,
+							uint8_t port)
+{
+	for (size_t i = 0; ports != NULL && i < ports->num; i++) {
+		if (ports->ports[i].port == port) {
+			return ports->ports[i].iface;
+		}
+	}
+
+	return NULL;
+}
+
+/**
+ * @brief Get the name of a port
+ *
+ * @param ports Port interfaces of the device, can be NULL
+ * @param port Value of the reg property of the port node
+ *
+ * @return The name of the port node, or NULL if there is no such port.
+ */
+static inline const char *ethernet_switch_port_name(const struct ethernet_switch_ports *ports,
+						    uint8_t port)
+{
+	for (size_t i = 0; ports != NULL && i < ports->num; i++) {
+		if (ports->ports[i].port == port) {
+			return ports->ports[i].name;
+		}
+	}
+
+	return NULL;
+}
+
+/** @cond INTERNAL_HIDDEN */
+
+/* Instance of the interface of a port, 0 is the host interface */
+#define Z_ETH_SWITCH_PORT_INSTANCE(child) UTIL_INC(DT_REG_ADDR(child))
+
+#define Z_ETH_SWITCH_PORT_DECLARE(child, is_port, inst)				\
+	IF_ENABLED(is_port(child, inst),					\
+		   (NET_IF_DT_INST_DECLARE(inst, Z_ETH_SWITCH_PORT_INSTANCE(child));))
+
+#define Z_ETH_SWITCH_PORT_ENTRY(child, is_port, inst)				\
+	IF_ENABLED(is_port(child, inst),					\
+		   ({								\
+			.port = DT_REG_ADDR(child),				\
+			.name = DEVICE_DT_NAME(child),				\
+			.iface = NET_IF_DT_INST_GET(inst,			\
+						    Z_ETH_SWITCH_PORT_INSTANCE(child)),	\
+		   },))
+
+#define Z_ETH_SWITCH_PORT_IFACE_DEFINE(child, is_port, inst, mtu)		\
+	IF_ENABLED(is_port(child, inst),					\
+		   (NET_DEVICE_DT_INST_ADD_IFACE(inst, ETHERNET_L2,		\
+						 NET_L2_GET_CTX_TYPE(ETHERNET_L2), mtu,	\
+						 Z_ETH_SWITCH_PORT_INSTANCE(child));))
+
+/** @endcond */
+
+/**
+ * @brief Get the port interfaces created by ETH_NET_SWITCH_PORTS_DT_INST_DEFINE()
+ *
+ * @param inst Driver instance number
+ */
+#define ETH_NET_SWITCH_PORTS_DT_INST_GET(inst) (&_CONCAT(ethernet_switch_ports_, inst))
+
+/**
+ * @brief Create the table of the port interfaces of a switch device
+ *
+ * Put it before the config of the device, which refers to the table, and use it with
+ * ETH_NET_SWITCH_DEVICE_DT_INST_DEFINE() with the same arguments. The ports are the children of
+ * @p parent that @p is_port tells.
+ *
+ * @param inst Driver instance number
+ * @param parent Node whose children are the ports
+ * @param is_port Macro called as is_port(child, inst), 1 if the child is a port that has an
+ *                interface and 0 if not
+ */
+#define ETH_NET_SWITCH_PORTS_DT_INST_DEFINE(inst, parent, is_port)			\
+	DT_FOREACH_CHILD_VARGS(parent, Z_ETH_SWITCH_PORT_DECLARE, is_port, inst)	\
+	static const struct ethernet_switch_port _CONCAT(ethernet_switch_port_array_, inst)[] = { \
+		DT_FOREACH_CHILD_VARGS(parent, Z_ETH_SWITCH_PORT_ENTRY, is_port, inst)	\
+	};										\
+	static const struct ethernet_switch_ports _CONCAT(ethernet_switch_ports_, inst) = { \
+		.num = ARRAY_SIZE(_CONCAT(ethernet_switch_port_array_, inst)),		\
+		.ports = _CONCAT(ethernet_switch_port_array_, inst),			\
+	}
+
+/**
+ * @brief Create an Ethernet switch device with an interface for the host and one per port
+ *
+ * Like ETH_NET_DEVICE_DT_INST_DEFINE(), which creates the device and the interface of the host
+ * (instance 0), and then one more interface bound to the same device for each port. The table
+ * of ETH_NET_SWITCH_PORTS_DT_INST_DEFINE() tells which interface is which.
+ *
+ * @param inst Driver instance number
+ * @param parent Node whose children are the ports
+ * @param is_port Macro called as is_port(child, inst), 1 if the child is a port that has an
+ *                interface and 0 if not
+ * @param mtu Maximum transfer unit of the interfaces
+ * @param init_fn Init function of the device
+ * @param pm Reference to struct pm_device of the device, or NULL
+ * @param data Pointer to the data of the device
+ * @param config Pointer to the config of the device
+ * @param prio Init priority of the device
+ * @param api Pointer to the Ethernet API of the device
+ */
+#define ETH_NET_SWITCH_DEVICE_DT_INST_DEFINE(inst, parent, is_port, mtu, init_fn, pm, data,	\
+					     config, prio, api)				\
+	ETH_NET_DEVICE_DT_INST_DEFINE(inst, init_fn, pm, data, config, prio, api, mtu);	\
+	DT_FOREACH_CHILD_VARGS(parent, Z_ETH_SWITCH_PORT_IFACE_DEFINE, is_port, inst, mtu)
+
+/**
  * @}
  */
 

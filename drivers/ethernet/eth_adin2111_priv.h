@@ -12,6 +12,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/ethernet_switch.h>
 #include <ethernet/eth_stats.h>
 
 /* SPI frequency maximum, based on clock cycle time */
@@ -221,11 +222,29 @@ enum adin2111_chips_id {
 	ADIN1110_MAC,
 };
 
+/* State of the interface of a port */
+struct adin2111_port_data {
+	struct net_if *iface;
+	uint8_t mac_addr[6];
+#if defined(CONFIG_NET_STATISTICS_ETHERNET)
+	struct net_stats_eth stats;
+#endif /* CONFIG_NET_STATISTICS_ETHERNET */
+};
+
+struct adin2111_port_config {
+	const struct device *phy;
+	const uint16_t phy_addr;
+};
+
 struct adin2111_config {
 	enum adin2111_chips_id id;
 	struct spi_dt_spec spi;
 	struct gpio_dt_spec interrupt;
 	struct gpio_dt_spec reset;
+	/* Interface of each port, they are all bound to the device */
+	const struct ethernet_switch_ports *ports;
+	/* Port 0: PHY 1, Port 1: PHY 2 */
+	struct adin2111_port_config port[2];
 };
 
 struct adin2111_data {
@@ -235,7 +254,7 @@ struct adin2111_data {
 	uint32_t imask1;
 	uint8_t *buf;
 	/* Port 0: PHY 1, Port 1: PHY 2 */
-	const struct device *port[2];
+	struct adin2111_port_data port[2];
 	uint8_t *oa_tx_buf;
 	uint8_t *oa_rx_buf;
 	uint16_t ifaces_left_to_init;
@@ -246,21 +265,6 @@ struct adin2111_data {
 	uint8_t oa_cps;
 	K_KERNEL_STACK_MEMBER(rx_thread_stack, CONFIG_ETH_ADIN2111_IRQ_THREAD_STACK_SIZE);
 	struct k_thread rx_thread;
-};
-
-struct adin2111_port_data {
-	struct net_if *iface;
-	uint8_t mac_addr[6];
-#if defined(CONFIG_NET_STATISTICS_ETHERNET)
-	struct net_stats_eth stats;
-#endif /* CONFIG_NET_STATISTICS_ETHERNET */
-};
-
-struct adin2111_port_config {
-	const struct device *adin;
-	const struct device *phy;
-	const uint16_t port_idx;
-	const uint16_t phy_addr;
 };
 
 int eth_adin2111_reg_write(const struct device *dev, const uint16_t reg, uint32_t val);
